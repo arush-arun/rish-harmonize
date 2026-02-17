@@ -3,6 +3,15 @@ rish-harmonize CLI
 
 Subcommands for RISH harmonization of multi-site diffusion MRI data.
 Supports both signal-level SH (per b-shell) and FOD-level modes.
+
+Signal-level SH workflow:
+
+  1. extract-native-rish  — Extract RISH features from native-space DWI
+  2. (user warps RISH to template space)
+  3. create-template      — Average template-space RISH across subjects
+  4. (user computes scale maps or uses rish-glm)
+  5. (user warps scale maps back to native space)
+  6. apply-harmonization  — Apply native-space scale maps to DWI
 """
 
 import argparse
@@ -24,7 +33,7 @@ def _load_manifest(path: str):
 
     Returns
     -------
-    subjects, site_labels, image_paths, covariates
+    subjects, site_labels, image_paths, covariates, mask_paths, mode_hint
     """
     rows = []
     with open(path) as f:
@@ -50,7 +59,7 @@ def _load_manifest(path: str):
         raise ValueError("Manifest must have 'dwi_path' or 'fod_path' column")
 
     # Extract covariates (everything except subject, site, *_path, mask_path)
-    skip = {"subject", "site", "dwi_path", "fod_path", "mask_path"}
+    skip = {"subject", "site", "dwi_path", "fod_path", "mask_path", "rish_dir"}
     cov_names = [f for f in fieldnames if f not in skip]
     covariates = {}
     for name in cov_names:
@@ -109,19 +118,67 @@ def cmd_extract_rish(args):
         print(f"  l={order}: {path}")
 
 
+def cmd_extract_native_rish(args):
+    """Extract per-shell RISH features from a native-space DWI."""
+    from ..core.harmonize import extract_native_rish, compute_consistent_lmax
+
+    # Compute consistent lmax if multiple DWIs provided
+    shell_lmax = None
+    if args.consistent_with:
+        all_dwis = _read_list_file(args.consistent_with)
+        # Include the current DWI in the consistency check
+        if args.dwi not in all_dwis:
+            all_dwis.append(args.dwi)
+        shell_lmax = compute_consistent_lmax(all_dwis, lmax=args.lmax)
+        print("Consistent lmax:")
+        for b, l in sorted(shell_lmax.items()):
+            print(f"  b={b}: lmax={l}")
+    elif args.lmax is not None:
+        # User-specified lmax applied to all shells (capped by data)
+        from ..core.shells import detect_shells
+        from ..core.sh_fitting import determine_lmax
+        info = detect_shells(args.dwi)
+        shell_lmax = {}
+        for b in info.b_values:
+            auto = determine_lmax(info.n_directions(b))
+            shell_lmax[b] = min(args.lmax, auto)
+
+    rish = extract_native_rish(
+        args.dwi,
+        args.output,
+        mask=args.mask,
+        shell_lmax=shell_lmax,
+        n_threads=args.threads,
+    )
+
+    print("Native RISH features extracted:")
+    for b_value, orders in sorted(rish.items()):
+        print(f"  b={b_value}:")
+        for order, path in sorted(orders.items()):
+            print(f"    l={order}: {path}")
+
+
 def cmd_create_template(args):
     """Create RISH reference template."""
     if args.mode == "signal":
-        from ..core.harmonize import create_reference_template_signal
+        from ..core.harmonize import create_reference_template_signal, load_rish_dir
 
-        dwi_list = _read_list_file(args.image_list)
-        mask_list = _read_list_file(args.mask_list) if args.mask_list else None
+        # Load RISH directories (already in template space)
+        rish_dirs = _read_list_file(args.rish_list)
+        rish_by_subject = [load_rish_dir(d) for d in rish_dirs]
+
+        # Load shell_lmax if provided
+        shell_lmax = None
+        if args.lmax_json:
+            with open(args.lmax_json) as f:
+                data = json.load(f)
+            lmax_data = data.get("shell_lmax", data)
+            shell_lmax = {int(b): l for b, l in lmax_data.items()}
 
         template = create_reference_template_signal(
-            dwi_list=dwi_list,
-            mask_list=mask_list,
+            rish_by_subject=rish_by_subject,
             output_dir=args.output,
-            lmax=args.lmax,
+            shell_lmax=shell_lmax,
             n_threads=args.threads,
         )
 
@@ -150,72 +207,141 @@ def cmd_create_template(args):
             print(f"  l={order}: {path}")
 
 
+def cmd_compute_scale_maps(args):
+    """Compute per-shell scale maps from reference and target RISH."""
+    from ..core.harmonize import load_rish_dir
+    from ..core.scale_maps import compute_scale_maps
+
+    ref_rish = load_rish_dir(args.ref_rish)
+    target_rish = load_rish_dir(args.target_rish)
+
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    all_scale_maps = {}
+    for b_value in sorted(ref_rish.keys()):
+        if b_value not in target_rish:
+            print(f"  Warning: b={b_value} not in target, skipping")
+            continue
+
+        shell_dir = str(output_dir / f"b{b_value}")
+        scale_maps = compute_scale_maps(
+            ref_rish[b_value],
+            target_rish[b_value],
+            shell_dir,
+            mask=args.mask,
+            smoothing_fwhm=args.smoothing,
+            clip_range=(args.clip_min, args.clip_max),
+            n_threads=args.threads,
+        )
+        all_scale_maps[b_value] = scale_maps
+
+        print(f"  b={b_value}:")
+        for order, path in sorted(scale_maps.items()):
+            print(f"    l={order}: {path}")
+
+    # Save metadata
+    meta = {
+        "scale_maps": {
+            str(b): {str(o): p for o, p in orders.items()}
+            for b, orders in all_scale_maps.items()
+        }
+    }
+    with open(output_dir / "scale_maps_meta.json", "w") as f:
+        json.dump(meta, f, indent=2)
+
+    print(f"\nScale maps saved to: {args.output}")
+
+
+def cmd_apply_harmonization(args):
+    """Apply pre-computed scale maps to a native-space DWI."""
+    from ..core.harmonize import apply_harmonization
+
+    # Load scale maps from directory
+    scale_maps_dir = Path(args.scale_maps)
+    scale_maps: Dict[int, Dict[int, str]] = {}
+
+    # Try loading from metadata
+    meta_path = scale_maps_dir / "scale_maps_meta.json"
+    if meta_path.exists():
+        with open(meta_path) as f:
+            meta = json.load(f)
+        for b_str, orders in meta["scale_maps"].items():
+            scale_maps[int(b_str)] = {int(o): p for o, p in orders.items()}
+    else:
+        # Scan directory structure: b{value}/scale_l{order}.mif
+        for shell_path in sorted(scale_maps_dir.iterdir()):
+            if not shell_path.is_dir() or not shell_path.name.startswith("b"):
+                continue
+            try:
+                b_value = int(shell_path.name[1:])
+            except ValueError:
+                continue
+            orders = {}
+            for f in sorted(shell_path.iterdir()):
+                if f.name.startswith("scale_l") and f.suffix == ".mif":
+                    try:
+                        order = int(f.stem.split("_l")[1])
+                        orders[order] = str(f)
+                    except (ValueError, IndexError):
+                        continue
+            if orders:
+                scale_maps[b_value] = orders
+
+    if not scale_maps:
+        raise FileNotFoundError(
+            f"No scale maps found in {args.scale_maps}. "
+            "Expected b*/scale_l*.mif structure or scale_maps_meta.json."
+        )
+
+    # Load shell_lmax if provided
+    shell_lmax = None
+    if args.lmax_json:
+        with open(args.lmax_json) as f:
+            data = json.load(f)
+        lmax_data = data.get("shell_lmax", data)
+        shell_lmax = {int(b): l for b, l in lmax_data.items()}
+
+    apply_harmonization(
+        dwi_image=args.dwi,
+        scale_maps=scale_maps,
+        output=args.output,
+        shell_lmax=shell_lmax,
+        n_threads=args.threads,
+    )
+
+    print(f"Harmonized DWI written to: {args.output}")
+
+
 def cmd_harmonize(args):
-    """Harmonize a target image against a reference template."""
-    # Load template metadata
+    """Harmonize a target image against a reference template (FOD mode)."""
+    from ..core.harmonize import harmonize_fod
+
     template_dir = Path(args.template)
-
-    if args.mode == "signal":
-        from ..core.harmonize import harmonize_signal_sh
-
-        # Load per-shell template RISH paths from template metadata
-        meta_path = template_dir / "template_meta.json"
-        if not meta_path.exists():
-            raise FileNotFoundError(
-                f"Template metadata not found: {meta_path}\n"
-                "Run 'create-template' first, or provide template_meta.json"
-            )
-
-        with open(meta_path) as f:
-            meta = json.load(f)
-
-        reference_rish = {}
-        for b_str, orders in meta["reference_rish"].items():
-            reference_rish[int(b_str)] = {int(k): v for k, v in orders.items()}
-
-        # Load per-shell lmax from template (ensures consistency)
-        shell_lmax = {int(b): l for b, l in meta["shell_lmax"].items()}
-
-        harmonize_signal_sh(
-            dwi_image=args.target,
-            reference_rish=reference_rish,
-            output=args.output,
-            mask=args.mask,
-            shell_lmax=shell_lmax,
-            smoothing_fwhm=args.smoothing,
-            clip_range=(args.clip_min, args.clip_max),
-            n_threads=args.threads,
+    meta_path = template_dir / "template_meta.json"
+    if not meta_path.exists():
+        raise FileNotFoundError(
+            f"Template metadata not found: {meta_path}\n"
+            "Run 'create-template' first."
         )
 
-        print(f"Harmonized DWI written to: {args.output}")
+    with open(meta_path) as f:
+        meta = json.load(f)
 
-    elif args.mode == "fod":
-        from ..core.harmonize import harmonize_fod
+    reference_rish = {int(k): v for k, v in meta["reference_rish"].items()}
 
-        meta_path = template_dir / "template_meta.json"
-        if not meta_path.exists():
-            raise FileNotFoundError(
-                f"Template metadata not found: {meta_path}\n"
-                "Run 'create-template' first, or provide template_meta.json"
-            )
+    harmonize_fod(
+        fod_image=args.target,
+        reference_rish=reference_rish,
+        output=args.output,
+        mask=args.mask,
+        lmax=args.lmax,
+        smoothing_fwhm=args.smoothing,
+        clip_range=(args.clip_min, args.clip_max),
+        n_threads=args.threads,
+    )
 
-        with open(meta_path) as f:
-            meta = json.load(f)
-
-        reference_rish = {int(k): v for k, v in meta["reference_rish"].items()}
-
-        harmonize_fod(
-            fod_image=args.target,
-            reference_rish=reference_rish,
-            output=args.output,
-            mask=args.mask,
-            lmax=args.lmax,
-            smoothing_fwhm=args.smoothing,
-            clip_range=(args.clip_min, args.clip_max),
-            n_threads=args.threads,
-        )
-
-        print(f"Harmonized FOD written to: {args.output}")
+    print(f"Harmonized FOD written to: {args.output}")
 
 
 def cmd_rish_glm(args):
@@ -235,7 +361,7 @@ def cmd_rish_glm(args):
             compute_glm_scale_maps_per_shell,
         )
         from ..core.harmonize import (
-            harmonize_signal_sh_with_maps,
+            apply_harmonization,
             compute_consistent_lmax,
         )
 
@@ -276,7 +402,7 @@ def cmd_rish_glm(args):
                 sh_path = str(shell_dir / "sh.mif")
                 fit_sh(
                     shell_dwi, sh_path,
-                    lmax=this_lmax, mask=subj_mask,
+                    lmax=this_lmax,
                     n_threads=args.threads,
                 )
 
@@ -341,11 +467,10 @@ def cmd_rish_glm(args):
                     harm_dir.mkdir(parents=True, exist_ok=True)
                     harm_output = str(harm_dir / "dwi_harmonized.mif")
 
-                    harmonize_signal_sh_with_maps(
+                    apply_harmonization(
                         dwi_image=image_paths[j],
                         scale_maps=scale_maps,
                         output=harm_output,
-                        mask=mask_paths[j] if mask_paths else mask,
                         shell_lmax=consistent_lmax,
                         n_threads=args.threads,
                     )
@@ -483,24 +608,74 @@ def build_parser():
     p.add_argument("--threads", type=int, default=1, help="Number of threads")
     p.set_defaults(func=cmd_extract_rish)
 
+    # -- extract-native-rish --
+    p = subparsers.add_parser("extract-native-rish",
+                               help="Extract per-shell RISH from native-space DWI")
+    p.add_argument("dwi", help="Input DWI image (native space)")
+    p.add_argument("-o", "--output", required=True, help="Output directory")
+    p.add_argument("--mask", help="Brain mask")
+    p.add_argument("--lmax", type=int, default=None,
+                    help="Maximum SH order (applied to all shells, capped by data)")
+    p.add_argument("--consistent-with", metavar="FILE",
+                    help="Text file listing all DWI images; computes minimum lmax "
+                         "across all subjects per shell for consistency")
+    p.add_argument("--threads", type=int, default=1, help="Number of threads")
+    p.set_defaults(func=cmd_extract_native_rish)
+
     # -- create-template --
     p = subparsers.add_parser("create-template", help="Create RISH reference template")
     p.add_argument("--mode", required=True, choices=["signal", "fod"],
                     help="Harmonization mode")
-    p.add_argument("--image-list", required=True,
-                    help="Text file with one image path per line (DWI for signal, FOD for fod)")
+    # signal mode: takes RISH directories
+    p.add_argument("--rish-list",
+                    help="(signal) Text file with one RISH directory per line "
+                         "(template-space, from extract-native-rish + warping)")
+    # fod mode: takes FOD images
+    p.add_argument("--image-list",
+                    help="(fod) Text file with one FOD image path per line")
     p.add_argument("--mask-list", help="Text file with one mask path per line")
     p.add_argument("-o", "--output", required=True, help="Output directory")
-    p.add_argument("--lmax", type=int, default=None, help="Maximum SH order")
+    p.add_argument("--lmax", type=int, default=None,
+                    help="(fod) Maximum SH order")
+    p.add_argument("--lmax-json",
+                    help="(signal) JSON file with shell_lmax (from extract-native-rish)")
     p.add_argument("--threads", type=int, default=1, help="Number of threads")
     p.set_defaults(func=cmd_create_template)
 
-    # -- harmonize --
+    # -- compute-scale-maps --
+    p = subparsers.add_parser("compute-scale-maps",
+                               help="Compute per-shell scale maps from ref and target RISH")
+    p.add_argument("--ref-rish", required=True,
+                    help="Reference RISH directory (template space)")
+    p.add_argument("--target-rish", required=True,
+                    help="Target RISH directory (template space)")
+    p.add_argument("-o", "--output", required=True, help="Output directory for scale maps")
+    p.add_argument("--mask", help="Brain mask (template space)")
+    p.add_argument("--smoothing", type=float, default=3.0,
+                    help="Scale map smoothing FWHM in mm (default: 3.0)")
+    p.add_argument("--clip-min", type=float, default=0.5,
+                    help="Minimum scale factor (default: 0.5)")
+    p.add_argument("--clip-max", type=float, default=2.0,
+                    help="Maximum scale factor (default: 2.0)")
+    p.add_argument("--threads", type=int, default=1, help="Number of threads")
+    p.set_defaults(func=cmd_compute_scale_maps)
+
+    # -- apply-harmonization --
+    p = subparsers.add_parser("apply-harmonization",
+                               help="Apply per-shell scale maps to native-space DWI")
+    p.add_argument("dwi", help="Input DWI image (native space)")
+    p.add_argument("--scale-maps", required=True,
+                    help="Scale maps directory (native space)")
+    p.add_argument("-o", "--output", required=True, help="Output harmonized DWI")
+    p.add_argument("--lmax-json",
+                    help="JSON file with shell_lmax for consistency")
+    p.add_argument("--threads", type=int, default=1, help="Number of threads")
+    p.set_defaults(func=cmd_apply_harmonization)
+
+    # -- harmonize (FOD mode shortcut) --
     p = subparsers.add_parser("harmonize",
-                               help="Harmonize a target against a reference template")
-    p.add_argument("--mode", required=True, choices=["signal", "fod"],
-                    help="Harmonization mode")
-    p.add_argument("--target", required=True, help="Target image (DWI or FOD)")
+                               help="Harmonize a FOD image against a reference template")
+    p.add_argument("--target", required=True, help="Target FOD image")
     p.add_argument("--template", required=True, help="Template directory")
     p.add_argument("--mask", help="Brain mask")
     p.add_argument("-o", "--output", required=True, help="Output path")

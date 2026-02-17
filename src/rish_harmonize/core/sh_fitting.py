@@ -54,25 +54,23 @@ def fit_sh(
     dwi_shell: str,
     output: str,
     lmax: Optional[int] = None,
-    mask: Optional[str] = None,
     normalise: bool = False,
     n_threads: int = 1,
 ) -> str:
     """Fit spherical harmonics to single-shell DWI signal.
 
-    Wrapper for MRtrix3's `amp2sh`.
+    Wrapper for MRtrix3's `amp2sh`. Note: amp2sh does not support
+    masking — it fits SH to the full image.
 
     Parameters
     ----------
     dwi_shell : str
-        Input single-shell DWI (b=0 + DW volumes).
+        Input single-shell DWI (DW volumes only, no b=0).
     output : str
         Output path for SH coefficient image.
     lmax : int, optional
         Maximum SH order. If None, auto-determined from
         number of directions.
-    mask : str, optional
-        Brain mask.
     normalise : bool
         Normalise signal to b=0 before fitting.
     n_threads : int
@@ -89,8 +87,6 @@ def fit_sh(
 
     if lmax is not None:
         cmd.extend(["-lmax", str(lmax)])
-    if mask:
-        cmd.extend(["-mask", mask])
     if normalise:
         cmd.append("-normalise")
     if n_threads > 1:

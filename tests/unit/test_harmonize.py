@@ -1,13 +1,16 @@
 """Tests for core/harmonize.py — harmonization pipeline logic."""
 
+import json
 import pytest
 from unittest.mock import patch, MagicMock
 
 from rish_harmonize.core.harmonize import (
     harmonize_sh,
-    harmonize_signal_sh,
+    apply_harmonization,
     harmonize_fod,
     compute_consistent_lmax,
+    extract_native_rish,
+    load_rish_dir,
 )
 from rish_harmonize.core.shells import ShellInfo
 
@@ -67,14 +70,13 @@ class TestComputeConsistentLmax:
         assert result[1000] == 4
 
 
-class TestHarmonizeSignalShValidation:
-    """Test input validation in harmonize_signal_sh."""
+class TestApplyHarmonizationValidation:
+    """Test input validation in apply_harmonization."""
 
-    @patch("rish_harmonize.core.shells._run_cmd")
     @patch("rish_harmonize.core.harmonize.extract_b0")
     @patch("rish_harmonize.core.harmonize.detect_shells")
-    def test_missing_shell_in_reference(self, mock_detect, mock_b0, mock_cmd, tmp_path):
-        """Should raise if reference_rish is missing a b-value shell."""
+    def test_missing_shell_in_scale_maps(self, mock_detect, mock_b0, tmp_path):
+        """Should raise if scale_maps is missing a b-value shell."""
         mock_detect.return_value = ShellInfo(
             b_values=[1000, 2000],
             shell_indices={1000: [1, 2], 2000: [3, 4]},
@@ -82,14 +84,13 @@ class TestHarmonizeSignalShValidation:
         )
         mock_b0.return_value = str(tmp_path / "b0.mif")
 
-        # Only provide reference for b=2000, not b=1000
-        # b=1000 is processed first (iteration order), so it will fail
-        reference_rish = {2000: {0: "ref_l0.mif", 2: "ref_l2.mif"}}
+        # Only provide scale maps for b=2000, not b=1000
+        scale_maps = {2000: {0: "scale_l0.mif", 2: "scale_l2.mif"}}
 
-        with pytest.raises(ValueError, match="No reference RISH for b=1000"):
-            harmonize_signal_sh(
+        with pytest.raises(ValueError, match="No scale maps for b=1000"):
+            apply_harmonization(
                 "dwi.mif",
-                reference_rish,
+                scale_maps,
                 str(tmp_path / "out.mif"),
             )
 
@@ -113,3 +114,45 @@ class TestHarmonizeFodValidation:
         harmonize_fod("fod.mif", reference_rish, output)
 
         mock_lmax.assert_called_once_with("fod.mif")
+
+
+class TestLoadRishDir:
+    """Test RISH directory loading."""
+
+    def test_loads_from_directory_structure(self, tmp_path):
+        """Should find RISH files from b*/rish/rish_l*.mif convention."""
+        # Create directory structure
+        for b in [1000, 2000]:
+            rish_dir = tmp_path / f"b{b}" / "rish"
+            rish_dir.mkdir(parents=True)
+            for order in [0, 2, 4]:
+                (rish_dir / f"rish_l{order}.mif").touch()
+
+        result = load_rish_dir(str(tmp_path))
+
+        assert 1000 in result
+        assert 2000 in result
+        assert set(result[1000].keys()) == {0, 2, 4}
+        assert set(result[2000].keys()) == {0, 2, 4}
+
+    def test_loads_from_metadata_json(self, tmp_path):
+        """Should load from shell_meta.json if present."""
+        meta = {
+            "rish": {
+                "1000": {"0": "/path/rish_l0.mif", "2": "/path/rish_l2.mif"},
+                "3000": {"0": "/path2/rish_l0.mif"},
+            }
+        }
+        with open(tmp_path / "shell_meta.json", "w") as f:
+            json.dump(meta, f)
+
+        result = load_rish_dir(str(tmp_path))
+
+        assert result[1000][0] == "/path/rish_l0.mif"
+        assert result[1000][2] == "/path/rish_l2.mif"
+        assert result[3000][0] == "/path2/rish_l0.mif"
+
+    def test_raises_on_empty_dir(self, tmp_path):
+        """Should raise if no RISH features found."""
+        with pytest.raises(FileNotFoundError, match="No RISH features found"):
+            load_rish_dir(str(tmp_path))

@@ -3,6 +3,21 @@ Harmonization Module
 
 Applies RISH scale maps to spherical harmonic coefficients.
 Supports both signal-level SH (per b-shell) and FOD-level harmonization.
+
+Signal-level SH workflow (native <-> template space):
+
+  1. extract_native_rish()       — Native DWI -> per-shell SH -> RISH features
+  2. (user warps RISH to template space, e.g. mrtransform)
+  3. create_reference_template_signal() — Average template-space RISH
+  4. compute_scale_maps()         — Template-space ref/target RISH -> scale maps
+  5. (user warps scale maps back to native space)
+  6. apply_harmonization()        — Native DWI + native scale maps -> harmonized DWI
+
+FOD-level workflow (all in template space):
+
+  1. extract_rish_features()     — FOD -> RISH
+  2. create_reference_template_fod() — Average RISH
+  3. harmonize_fod()             — Compute scale maps + apply to FOD
 """
 
 import json
@@ -74,6 +89,185 @@ def run_mrtrix_cmd(cmd: List[str], check: bool = True) -> subprocess.CompletedPr
         )
     return result
 
+
+# ---------------------------------------------------------------------------
+# RISH extraction (native space)
+# ---------------------------------------------------------------------------
+
+def extract_native_rish(
+    dwi_image: str,
+    output_dir: str,
+    mask: Optional[str] = None,
+    shell_lmax: Optional[Dict[int, int]] = None,
+    n_threads: int = 1,
+) -> Dict[int, Dict[int, str]]:
+    """Extract RISH features from a native-space DWI image.
+
+    Performs: detect shells -> separate DW-only -> amp2sh -> extract RISH.
+    Also saves intermediate SH images and directions for later use
+    in apply_harmonization().
+
+    Output directory structure::
+
+        output_dir/
+            shell_meta.json      # shell info + lmax metadata
+            b{value}/
+                dwi_dw_only.mif  # separated DW volumes
+                sh.mif           # SH coefficients
+                directions.txt   # gradient directions (for sh2amp)
+                rish/
+                    rish_l0.mif
+                    rish_l2.mif
+                    ...
+
+    Parameters
+    ----------
+    dwi_image : str
+        Input multi-shell DWI image in native space.
+    output_dir : str
+        Output directory for extracted features.
+    mask : str, optional
+        Brain mask (for RISH extraction only — amp2sh does not support masking).
+    shell_lmax : dict, optional
+        {b_value: lmax}. If None, auto-determined from direction count.
+    n_threads : int
+        Number of threads.
+
+    Returns
+    -------
+    dict
+        {b_value: {order: rish_path}} — RISH features per shell per order.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    shell_info = detect_shells(dwi_image)
+    all_rish: Dict[int, Dict[int, str]] = {}
+
+    # Determine lmax per shell
+    used_lmax = {}
+    for b_value in shell_info.b_values:
+        if shell_lmax is not None and b_value in shell_lmax:
+            used_lmax[b_value] = shell_lmax[b_value]
+        else:
+            n_dirs = shell_info.n_directions(b_value)
+            used_lmax[b_value] = determine_lmax(n_dirs)
+
+    for b_value in shell_info.b_values:
+        this_lmax = used_lmax[b_value]
+        shell_dir = output_dir / f"b{b_value}"
+        shell_dir.mkdir(exist_ok=True)
+
+        # 1. Separate DW volumes only (no b=0)
+        shell_dwi = str(shell_dir / "dwi_dw_only.mif")
+        separate_shell(
+            dwi_image, shell_info, b_value, shell_dwi,
+            include_b0=False, n_threads=n_threads,
+        )
+
+        # 2. Fit SH (amp2sh does not support masking)
+        sh_path = str(shell_dir / "sh.mif")
+        fit_sh(
+            shell_dwi, sh_path,
+            lmax=this_lmax,
+            n_threads=n_threads,
+        )
+
+        # 3. Save gradient directions (needed for sh2amp in apply step)
+        directions_path = str(shell_dir / "directions.txt")
+        get_directions(shell_dwi, directions_path)
+
+        # 4. Extract RISH features
+        rish_dir = str(shell_dir / "rish")
+        rish = extract_rish_features(
+            sh_path, rish_dir,
+            lmax=this_lmax, mask=mask,
+            n_threads=n_threads,
+        )
+
+        all_rish[b_value] = rish
+
+    # Save metadata
+    meta = {
+        "dwi_image": str(dwi_image),
+        "shell_lmax": {str(b): l for b, l in used_lmax.items()},
+        "b_values": shell_info.b_values,
+        "rish": {
+            str(b): {str(o): p for o, p in orders.items()}
+            for b, orders in all_rish.items()
+        },
+    }
+    with open(output_dir / "shell_meta.json", "w") as f:
+        json.dump(meta, f, indent=2)
+
+    return all_rish
+
+
+def load_rish_dir(rish_dir: str) -> Dict[int, Dict[int, str]]:
+    """Load RISH features from a standard directory structure.
+
+    Scans for directories named ``b{value}/rish/rish_l{order}.mif``
+    (as produced by extract_native_rish or after warping to template).
+
+    Parameters
+    ----------
+    rish_dir : str
+        Directory containing per-shell RISH features.
+
+    Returns
+    -------
+    dict
+        {b_value: {order: rish_path}}
+    """
+    rish_dir = Path(rish_dir)
+    result: Dict[int, Dict[int, str]] = {}
+
+    # Try loading from shell_meta.json first
+    meta_path = rish_dir / "shell_meta.json"
+    if meta_path.exists():
+        with open(meta_path) as f:
+            meta = json.load(f)
+        for b_str, orders in meta["rish"].items():
+            result[int(b_str)] = {int(o): p for o, p in orders.items()}
+        return result
+
+    # Fall back to directory scanning
+    for shell_path in sorted(rish_dir.iterdir()):
+        if not shell_path.is_dir() or not shell_path.name.startswith("b"):
+            continue
+        try:
+            b_value = int(shell_path.name[1:])
+        except ValueError:
+            continue
+
+        rish_subdir = shell_path / "rish"
+        if not rish_subdir.is_dir():
+            continue
+
+        orders = {}
+        for rish_file in sorted(rish_subdir.iterdir()):
+            if rish_file.name.startswith("rish_l") and rish_file.suffix == ".mif":
+                try:
+                    order = int(rish_file.stem.split("_l")[1])
+                    orders[order] = str(rish_file)
+                except (ValueError, IndexError):
+                    continue
+
+        if orders:
+            result[b_value] = orders
+
+    if not result:
+        raise FileNotFoundError(
+            f"No RISH features found in {rish_dir}. "
+            "Expected b*/rish/rish_l*.mif structure."
+        )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Core SH harmonization operation
+# ---------------------------------------------------------------------------
 
 def harmonize_sh(
     sh_image: str,
@@ -163,198 +357,45 @@ def harmonize_sh(
 # Signal-level SH harmonization (per b-shell)
 # ---------------------------------------------------------------------------
 
-def harmonize_signal_sh(
-    dwi_image: str,
-    reference_rish: Dict[int, Dict[int, str]],
-    output: str,
-    mask: Optional[str] = None,
-    shell_info: Optional[ShellInfo] = None,
-    shell_lmax: Optional[Dict[int, int]] = None,
-    smoothing_fwhm: float = 3.0,
-    clip_range: tuple = (0.5, 2.0),
-    n_threads: int = 1,
-) -> str:
-    """
-    Full signal-level SH harmonization pipeline.
-
-    Separate shells -> amp2sh per shell -> extract RISH -> compute scale
-    maps -> apply to SH -> sh2amp -> rejoin shells.
-
-    Parameters
-    ----------
-    dwi_image : str
-        Input multi-shell DWI image (registered to template space)
-    reference_rish : dict
-        {b_value: {order: path}} — per-shell, per-order reference RISH
-        template images
-    output : str
-        Output path for harmonized DWI
-    mask : str, optional
-        Brain mask
-    shell_info : ShellInfo, optional
-        Pre-computed shell info (auto-detected if None)
-    shell_lmax : dict, optional
-        {b_value: lmax} — per-shell lmax from template metadata.
-        Must match the lmax used to create the reference template.
-        If None, auto-determined from this subject's direction count
-        (only safe if all subjects have matching directions).
-    smoothing_fwhm : float
-        Scale map smoothing FWHM in mm
-    clip_range : tuple
-        (min, max) clipping range for scale factors
-    n_threads : int
-        Number of threads
-
-    Returns
-    -------
-    str
-        Path to harmonized DWI image
-    """
-    Path(output).parent.mkdir(parents=True, exist_ok=True)
-
-    if shell_info is None:
-        shell_info = detect_shells(dwi_image)
-
-    thread_opt = ["-nthreads", str(n_threads)] if n_threads > 1 else []
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir = Path(tmpdir)
-
-        # Extract b=0 image (not harmonized)
-        b0_path = str(tmpdir / "b0.mif")
-        extract_b0(dwi_image, b0_path, n_threads=n_threads)
-
-        harmonized_shells = {}
-
-        for b_value in shell_info.b_values:
-            if b_value not in reference_rish:
-                raise ValueError(
-                    f"No reference RISH for b={b_value}. "
-                    f"Available: {list(reference_rish.keys())}"
-                )
-
-            shell_dir = tmpdir / f"b{b_value}"
-            shell_dir.mkdir()
-
-            # 1. Separate DW volumes only (no b=0) — b=0 has no angular
-            #    dependence and should not enter the SH fitting pipeline
-            shell_dwi = str(shell_dir / "dwi_dw_only.mif")
-            separate_shell(
-                dwi_image, shell_info, b_value, shell_dwi,
-                include_b0=False, n_threads=n_threads,
-            )
-
-            # 2. Get lmax for this shell (from template or auto-detect)
-            if shell_lmax is not None:
-                this_lmax = shell_lmax[b_value]
-            else:
-                n_dirs = shell_info.n_directions(b_value)
-                this_lmax = determine_lmax(n_dirs)
-
-            # 3. Fit SH to this shell's DW signal (no b=0)
-            sh_path = str(shell_dir / "sh.mif")
-            fit_sh(
-                shell_dwi, sh_path,
-                lmax=this_lmax, mask=mask,
-                n_threads=n_threads,
-            )
-
-            # 4. Extract RISH features from fitted SH
-            rish_dir = str(shell_dir / "rish")
-            target_rish = extract_rish_features(
-                sh_path, rish_dir,
-                lmax=this_lmax, mask=mask,
-                n_threads=n_threads,
-            )
-
-            # 5. Compute scale maps for this shell
-            ref_rish_for_shell = reference_rish[b_value]
-            scale_dir = str(shell_dir / "scale_maps")
-            scale_maps = compute_scale_maps(
-                ref_rish_for_shell,
-                target_rish,
-                scale_dir,
-                mask=mask,
-                smoothing_fwhm=smoothing_fwhm,
-                clip_range=clip_range,
-                n_threads=n_threads,
-            )
-
-            # 6. Apply scale maps to SH coefficients
-            sh_harmonized = str(shell_dir / "sh_harmonized.mif")
-            harmonize_sh(
-                sh_path, scale_maps, sh_harmonized,
-                lmax=this_lmax, n_threads=n_threads,
-            )
-
-            # 7. Reconstruct DW signal from harmonized SH
-            #    Output has same number of volumes as DW-only input
-            directions_path = str(shell_dir / "directions.txt")
-            get_directions(shell_dwi, directions_path)
-
-            dwi_harmonized = str(shell_dir / "dwi_harmonized.mif")
-            reconstruct_signal(
-                sh_harmonized, directions_path, dwi_harmonized,
-                n_threads=n_threads,
-            )
-
-            harmonized_shells[b_value] = dwi_harmonized
-
-        # 8. Rejoin shells into original volume order
-        rejoin_shells(
-            harmonized_shells, b0_path, output,
-            shell_info, n_threads=n_threads,
-        )
-
-    return output
-
-
-def harmonize_signal_sh_with_maps(
+def apply_harmonization(
     dwi_image: str,
     scale_maps: Dict[int, Dict[int, str]],
     output: str,
-    mask: Optional[str] = None,
-    shell_info: Optional[ShellInfo] = None,
     shell_lmax: Optional[Dict[int, int]] = None,
     n_threads: int = 1,
 ) -> str:
     """
-    Apply pre-computed per-shell scale maps to a DWI image.
+    Apply per-shell scale maps to a native-space DWI image.
 
-    Like harmonize_signal_sh() but skips RISH extraction and scale map
-    computation — useful when scale maps are already available (e.g.
-    from RISH-GLM fitting).
+    Performs: detect shells -> separate DW-only -> amp2sh -> apply scale
+    maps -> sh2amp -> rejoin with b=0.
+
+    Scale maps must be in native space (warped back from template
+    by the user before calling this function).
 
     Parameters
     ----------
     dwi_image : str
-        Input multi-shell DWI image
+        Input multi-shell DWI image in native space.
     scale_maps : dict
-        {b_value: {order: path}} — pre-computed per-shell, per-order
-        scale maps
+        {b_value: {order: scale_map_path}} — per-shell, per-order
+        scale maps in native space.
     output : str
-        Output path for harmonized DWI
-    mask : str, optional
-        Brain mask
-    shell_info : ShellInfo, optional
-        Pre-computed shell info
+        Output path for harmonized DWI.
     shell_lmax : dict, optional
-        {b_value: lmax} — per-shell lmax. Must match the lmax used
-        when computing the scale maps.
+        {b_value: lmax}. Must match the lmax used when computing
+        the scale maps. If None, auto-determined.
     n_threads : int
-        Number of threads
+        Number of threads.
 
     Returns
     -------
     str
-        Path to harmonized DWI image
+        Path to harmonized DWI image.
     """
     Path(output).parent.mkdir(parents=True, exist_ok=True)
 
-    if shell_info is None:
-        shell_info = detect_shells(dwi_image)
-
-    thread_opt = ["-nthreads", str(n_threads)] if n_threads > 1 else []
+    shell_info = detect_shells(dwi_image)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
@@ -392,7 +433,7 @@ def harmonize_signal_sh_with_maps(
             sh_path = str(shell_dir / "sh.mif")
             fit_sh(
                 shell_dwi, sh_path,
-                lmax=this_lmax, mask=mask,
+                lmax=this_lmax,
                 n_threads=n_threads,
             )
 
@@ -509,102 +550,60 @@ def harmonize_fod(
 # ---------------------------------------------------------------------------
 
 def create_reference_template_signal(
-    dwi_list: List[str],
-    mask_list: Optional[List[str]],
+    rish_by_subject: List[Dict[int, Dict[int, str]]],
     output_dir: str,
-    lmax: Optional[int] = None,
+    shell_lmax: Optional[Dict[int, int]] = None,
     n_threads: int = 1,
 ) -> Dict[int, Dict[int, str]]:
     """
-    Create per-shell RISH reference template from a set of DWI images.
+    Create per-shell RISH reference template by averaging across subjects.
 
-    For each subject and each b-shell, fits SH and extracts RISH features.
-    Then averages across subjects to produce the template.
-
-    Uses consistent lmax per shell (minimum across all subjects) so that
-    all subjects contribute the same SH orders.
+    All input RISH images must already be in template space (warped by
+    the user before calling this function). Use extract_native_rish()
+    to extract RISH in native space, then warp with mrtransform.
 
     Parameters
     ----------
-    dwi_list : list of str
-        DWI images from the reference site (registered to template space)
-    mask_list : list of str, optional
-        Brain masks (one per subject)
+    rish_by_subject : list of dict
+        Each element is {b_value: {order: rish_path}} for one subject,
+        already in template space.
     output_dir : str
-        Output directory for template
-    lmax : int, optional
-        Maximum SH order (clamped to per-shell minimum if provided)
+        Output directory for template.
+    shell_lmax : dict, optional
+        {b_value: lmax} — stored in metadata for consistency during
+        harmonization. If None, inferred from highest RISH order present.
     n_threads : int
-        Number of threads
+        Number of threads.
 
     Returns
     -------
     dict
-        {b_value: {order: template_rish_path}} — averaged RISH per shell
+        {b_value: {order: template_rish_path}} — averaged RISH per shell.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    n_subjects = len(dwi_list)
+    n_subjects = len(rish_by_subject)
 
-    # Compute consistent lmax across all subjects
-    consistent_lmax = compute_consistent_lmax(dwi_list, lmax=lmax)
-
-    # Per-shell, per-order RISH images for all subjects
-    # rish_images[b_value][order] = [sub0_path, sub1_path, ...]
+    # Collect all RISH paths: rish_images[b_value][order] = [path0, path1, ...]
     rish_images: Dict[int, Dict[int, List[str]]] = {}
-
-    for i, dwi in enumerate(dwi_list):
-        mask = mask_list[i] if mask_list else None
-        subj_dir = output_dir / "subjects" / f"sub-{i:03d}"
-        subj_dir.mkdir(parents=True, exist_ok=True)
-
-        subj_shell_info = detect_shells(dwi)
-
-        for b_value in subj_shell_info.b_values:
-            shell_dir = subj_dir / f"b{b_value}"
-            shell_dir.mkdir(exist_ok=True)
-
-            this_lmax = consistent_lmax[b_value]
-
-            # Separate DW volumes only (no b=0 for SH fitting)
-            shell_dwi = str(shell_dir / "dwi_dw_only.mif")
-            separate_shell(
-                dwi, subj_shell_info, b_value, shell_dwi,
-                include_b0=False, n_threads=n_threads,
-            )
-
-            # Fit SH
-            sh_path = str(shell_dir / "sh.mif")
-            fit_sh(
-                shell_dwi, sh_path,
-                lmax=this_lmax, mask=mask,
-                n_threads=n_threads,
-            )
-
-            # Extract RISH
-            rish_dir = str(shell_dir / "rish")
-            rish = extract_rish_features(
-                sh_path, rish_dir,
-                lmax=this_lmax, mask=mask,
-                n_threads=n_threads,
-            )
-
+    for subj_rish in rish_by_subject:
+        for b_value, orders in subj_rish.items():
             if b_value not in rish_images:
                 rish_images[b_value] = {}
-            for order, path in rish.items():
+            for order, path in orders.items():
                 if order not in rish_images[b_value]:
                     rish_images[b_value][order] = []
                 rish_images[b_value][order].append(path)
 
     # Average across subjects
     template: Dict[int, Dict[int, str]] = {}
-    for b_value in rish_images:
+    for b_value in sorted(rish_images.keys()):
         template[b_value] = {}
         template_dir = output_dir / f"template_b{b_value}"
         template_dir.mkdir(exist_ok=True)
 
-        for order, paths in rish_images[b_value].items():
+        for order, paths in sorted(rish_images[b_value].items()):
             if len(paths) != n_subjects:
                 raise ValueError(
                     f"b={b_value}, order={order}: expected {n_subjects} images, "
@@ -620,11 +619,17 @@ def create_reference_template_signal(
             ])
             template[b_value][order] = avg_path
 
-    # Save template metadata (including lmax per shell for harmonization)
+    # Infer shell_lmax from RISH orders if not provided
+    if shell_lmax is None:
+        shell_lmax = {}
+        for b_value, orders in template.items():
+            shell_lmax[b_value] = max(orders.keys())
+
+    # Save template metadata
     meta = {
         "mode": "signal",
         "n_subjects": n_subjects,
-        "shell_lmax": {str(b): l for b, l in consistent_lmax.items()},
+        "shell_lmax": {str(b): l for b, l in shell_lmax.items()},
         "reference_rish": {
             str(b): {str(o): p for o, p in orders.items()}
             for b, orders in template.items()

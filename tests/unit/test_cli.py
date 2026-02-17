@@ -23,15 +23,36 @@ class TestParser:
         assert args.input == "sh.mif"
         assert args.output == "rish/"
 
+    def test_extract_native_rish(self):
+        args = self.parser.parse_args([
+            "extract-native-rish", "dwi.mif",
+            "-o", "native_rish/",
+            "--mask", "mask.mif",
+            "--lmax", "6",
+        ])
+        assert args.command == "extract-native-rish"
+        assert args.dwi == "dwi.mif"
+        assert args.output == "native_rish/"
+        assert args.mask == "mask.mif"
+        assert args.lmax == 6
+
+    def test_extract_native_rish_consistent(self):
+        args = self.parser.parse_args([
+            "extract-native-rish", "dwi.mif",
+            "-o", "native_rish/",
+            "--consistent-with", "all_dwis.txt",
+        ])
+        assert args.consistent_with == "all_dwis.txt"
+
     def test_create_template_signal(self):
         args = self.parser.parse_args([
             "create-template",
             "--mode", "signal",
-            "--image-list", "dwis.txt",
+            "--rish-list", "rish_dirs.txt",
             "-o", "template/",
         ])
         assert args.mode == "signal"
-        assert args.image_list == "dwis.txt"
+        assert args.rish_list == "rish_dirs.txt"
 
     def test_create_template_fod(self):
         args = self.parser.parse_args([
@@ -45,11 +66,36 @@ class TestParser:
         assert args.mode == "fod"
         assert args.lmax == 8
 
-    def test_harmonize(self):
+    def test_compute_scale_maps(self):
+        args = self.parser.parse_args([
+            "compute-scale-maps",
+            "--ref-rish", "ref_rish/",
+            "--target-rish", "target_rish/",
+            "-o", "scale_maps/",
+            "--mask", "mask.mif",
+            "--smoothing", "5.0",
+        ])
+        assert args.command == "compute-scale-maps"
+        assert args.ref_rish == "ref_rish/"
+        assert args.target_rish == "target_rish/"
+        assert args.smoothing == 5.0
+
+    def test_apply_harmonization(self):
+        args = self.parser.parse_args([
+            "apply-harmonization", "dwi.mif",
+            "--scale-maps", "scale_maps/",
+            "-o", "harmonized.mif",
+            "--lmax-json", "lmax.json",
+        ])
+        assert args.command == "apply-harmonization"
+        assert args.dwi == "dwi.mif"
+        assert args.scale_maps == "scale_maps/"
+        assert args.lmax_json == "lmax.json"
+
+    def test_harmonize_fod(self):
         args = self.parser.parse_args([
             "harmonize",
-            "--mode", "signal",
-            "--target", "dwi.mif",
+            "--target", "fod.mif",
             "--template", "template/",
             "--mask", "mask.mif",
             "-o", "out.mif",
@@ -57,7 +103,7 @@ class TestParser:
             "--clip-min", "0.3",
             "--clip-max", "3.0",
         ])
-        assert args.mode == "signal"
+        assert args.command == "harmonize"
         assert args.smoothing == 5.0
         assert args.clip_min == 0.3
         assert args.clip_max == 3.0

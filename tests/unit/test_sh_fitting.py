@@ -72,12 +72,11 @@ class TestFitSh:
     @patch("rish_harmonize.core.sh_fitting._run_cmd")
     def test_with_options(self, mock_run, tmp_path):
         output = str(tmp_path / "sh.mif")
-        fit_sh("dwi.mif", output, lmax=6, mask="mask.mif", normalise=True, n_threads=4)
+        fit_sh("dwi.mif", output, lmax=6, normalise=True, n_threads=4)
 
         call_args = mock_run.call_args[0][0]
         assert "-lmax" in call_args
         assert "6" in call_args
-        assert "-mask" in call_args
         assert "-normalise" in call_args
         assert "-nthreads" in call_args
         assert "4" in call_args
