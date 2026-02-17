@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rish-harmonize"
+version = "0.1.0"
+description = "RISH harmonization for multi-site diffusion MRI"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.21",
+    "nibabel>=3.0",
+    "scipy>=1.7",
+]
+
+[project.scripts]
+rish-harmonize = "rish_harmonize.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
