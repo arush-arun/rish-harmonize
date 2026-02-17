@@ -158,6 +158,19 @@ def extract_native_rish(
         shell_dir = output_dir / f"b{b_value}"
         shell_dir.mkdir(exist_ok=True)
 
+        # Check if RISH extraction is already complete for this shell
+        rish_subdir = shell_dir / "rish"
+        expected_orders = list(range(0, this_lmax + 1, 2))
+        if rish_subdir.is_dir():
+            existing = {
+                int(f.stem.split("_l")[1]): str(f)
+                for f in rish_subdir.iterdir()
+                if f.name.startswith("rish_l") and f.suffix == ".mif"
+            }
+            if all(o in existing for o in expected_orders):
+                all_rish[b_value] = existing
+                continue
+
         # 1. Separate DW volumes only (no b=0)
         shell_dwi = str(shell_dir / "dwi_dw_only.mif")
         separate_shell(
@@ -222,12 +235,18 @@ def load_rish_dir(rish_dir: str) -> Dict[int, Dict[int, str]]:
     rish_dir = Path(rish_dir)
     result: Dict[int, Dict[int, str]] = {}
 
-    # Try loading from shell_meta.json first
-    meta_path = rish_dir / "shell_meta.json"
-    if meta_path.exists():
+    # Try loading from metadata JSON first
+    for meta_name in ("shell_meta.json", "template_meta.json"):
+        meta_path = rish_dir / meta_name
+        if not meta_path.exists():
+            continue
         with open(meta_path) as f:
             meta = json.load(f)
-        for b_str, orders in meta["rish"].items():
+        # shell_meta.json uses "rish", template_meta.json uses "reference_rish"
+        rish_key = "reference_rish" if "reference_rish" in meta else "rish"
+        if rish_key not in meta:
+            continue
+        for b_str, orders in meta[rish_key].items():
             result[int(b_str)] = {int(o): p for o, p in orders.items()}
         return result
 

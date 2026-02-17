@@ -152,6 +152,22 @@ class TestLoadRishDir:
         assert result[1000][2] == "/path/rish_l2.mif"
         assert result[3000][0] == "/path2/rish_l0.mif"
 
+    def test_loads_from_template_metadata_json(self, tmp_path):
+        """Should load from template_meta.json if present."""
+        meta = {
+            "mode": "signal",
+            "reference_rish": {
+                "3000": {"0": "/tmpl/rish_l0.mif", "2": "/tmpl/rish_l2.mif"},
+            }
+        }
+        with open(tmp_path / "template_meta.json", "w") as f:
+            json.dump(meta, f)
+
+        result = load_rish_dir(str(tmp_path))
+
+        assert result[3000][0] == "/tmpl/rish_l0.mif"
+        assert result[3000][2] == "/tmpl/rish_l2.mif"
+
     def test_raises_on_empty_dir(self, tmp_path):
         """Should raise if no RISH features found."""
         with pytest.raises(FileNotFoundError, match="No RISH features found"):

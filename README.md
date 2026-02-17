@@ -25,28 +25,60 @@ pip install -e .
 
 ### Signal-level SH harmonization
 
-**Step 1: Create a reference template** from the reference site's DWI data (all registered to a common template space):
+SH fitting and harmonization happen in native space; RISH comparison and scale map computation happen in template space. See `workflow.md` for full details.
+
+**Step 1: Extract RISH features** in native space (for each subject, both sites):
 
 ```bash
-rish-harmonize create-template \
-    --mode signal \
-    --image-list ref_dwis.txt \
-    --mask-list ref_masks.txt \
-    -o template/ \
-    --lmax 6
+rish-harmonize extract-native-rish dwi.mif \
+    -o sub01/native_rish/ \
+    --mask mask.mif \
+    --consistent-with all_dwis.txt
 ```
 
-Where `ref_dwis.txt` is a text file with one DWI path per line.
-
-**Step 2: Harmonize target subjects:**
+**Step 2: Warp RISH to template space** (user-provided registration):
 
 ```bash
-rish-harmonize harmonize \
-    --mode signal \
-    --target target_dwi.mif \
-    --template template/ \
-    --mask mask.mif \
-    -o harmonized_dwi.mif
+for f in sub01/native_rish/b3000/rish/rish_l*.mif; do
+    mrtransform "$f" -linear affine.txt -template template_grid.mif \
+        -interp linear "sub01/template_rish/b3000/rish/$(basename $f)"
+done
+```
+
+**Step 3: Create reference template** from reference-site RISH (in template space):
+
+```bash
+rish-harmonize create-template --mode signal \
+    --rish-list ref_rish_dirs.txt \
+    -o template/
+```
+
+**Step 4: Compute scale maps** in template space (for each target subject):
+
+```bash
+rish-harmonize compute-scale-maps \
+    --ref-rish template/ \
+    --target-rish sub01/template_rish/ \
+    -o sub01/scale_maps_template/ \
+    --mask template_mask.mif
+```
+
+**Step 5: Warp scale maps back to native space** (user-provided inverse registration):
+
+```bash
+for f in sub01/scale_maps_template/b3000/scale_l*.mif; do
+    mrtransform "$f" -linear affine.txt -inverse -template native_grid.mif \
+        -interp linear "sub01/scale_maps_native/b3000/$(basename $f)"
+done
+```
+
+**Step 6: Apply harmonization** in native space:
+
+```bash
+rish-harmonize apply-harmonization dwi.mif \
+    --scale-maps sub01/scale_maps_native/ \
+    -o dwi_harmonized.mif \
+    --lmax-json sub01/native_rish/shell_meta.json
 ```
 
 ### RISH-GLM (joint site + covariate model)
@@ -78,8 +110,11 @@ Use `fod_path` instead of `dwi_path` for FOD-level mode.
 |---------|-------------|
 | `detect-shells` | Show b-value shell structure of a DWI image |
 | `extract-rish` | Extract RISH features from an SH image |
-| `create-template` | Create RISH reference template from a site |
-| `harmonize` | Harmonize a target image against a template |
+| `extract-native-rish` | Extract per-shell RISH from native-space DWI |
+| `create-template` | Create RISH reference template (signal or FOD mode) |
+| `compute-scale-maps` | Compute per-shell scale maps from ref/target RISH |
+| `apply-harmonization` | Apply native-space scale maps to DWI |
+| `harmonize` | Harmonize a target FOD against a template |
 | `rish-glm` | Fit RISH-GLM joint model and harmonize |
 | `site-effect` | Test for site effects via permutation testing |
 
@@ -88,34 +123,29 @@ Run `rish-harmonize <command> --help` for detailed options.
 ## Signal-level SH pipeline
 
 ```
-DWI (multi-shell, registered to template space)
-    |
-    v
-detect shells (b=1000, b=3000, ...)
-    |
-    v
-separate per shell (DW volumes only, no b=0)
-    |
-    v
-amp2sh per shell --> SH coefficients
-    |
-    v
-extract RISH per shell per order (l=0, l=2, l=4, ...)
-    |
-    v
-compute scale maps:  scale_l = RISH_ref / RISH_target
-    |
-    v
-apply scale maps to SH coefficients
-    |
-    v
-sh2amp per shell --> harmonized DW signal
-    |
-    v
-rejoin shells + original b=0
-    |
-    v
-harmonized DWI
+Native space                    Template space
+
+1. Extract RISH per subject
+   DWI -> shells -> amp2sh -> RISH
+   (scalar, rotationally invariant)
+        |
+        |  2. Warp RISH to template
+        |     (mrtransform, standard scalar warp)
+        |------------------------------>|
+        |                               |
+        |                    3. Average reference RISH
+        |                       across ref-site subjects
+        |                       -> reference template
+        |
+        |                    4. Compute scale maps
+        |                       ref_RISH / target_RISH
+        |                       per shell, per order
+        |                               |
+        |  5. Warp scale maps  <--------|
+        |     back to native
+        |
+6. Apply scale maps to native SH
+   SH x scale -> sh2amp -> harmonized DWI
 ```
 
 b=0 volumes are carried through unmodified (no angular dependence).

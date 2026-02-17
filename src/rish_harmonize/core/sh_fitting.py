@@ -157,6 +157,7 @@ def get_directions(
     _run_cmd([
         "mrinfo", dwi_image,
         "-export_grad_mrtrix", output,
+        "-force",
     ])
 
     return output
