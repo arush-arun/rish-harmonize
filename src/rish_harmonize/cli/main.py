@@ -29,7 +29,7 @@ def _read_list_file(path: str) -> List[str]:
 
 
 def _load_manifest(path: str):
-    """Load a manifest CSV with columns: subject, site, dwi_path/fod_path, [covariates].
+    """Load a manifest CSV with columns: subject, site, rish_dir/dwi_path/fod_path, [covariates].
 
     Returns
     -------
@@ -48,15 +48,20 @@ def _load_manifest(path: str):
     subjects = [r["subject"] for r in rows]
     site_labels = [r["site"] for r in rows]
 
-    # Determine image path column
-    if "dwi_path" in fieldnames:
+    # Determine image path column (priority: rish_dir > dwi_path > fod_path)
+    if "rish_dir" in fieldnames:
+        image_paths = [r["rish_dir"] for r in rows]
+        mode_hint = "signal_rish"
+    elif "dwi_path" in fieldnames:
         image_paths = [r["dwi_path"] for r in rows]
         mode_hint = "signal"
     elif "fod_path" in fieldnames:
         image_paths = [r["fod_path"] for r in rows]
         mode_hint = "fod"
     else:
-        raise ValueError("Manifest must have 'dwi_path' or 'fod_path' column")
+        raise ValueError(
+            "Manifest must have 'rish_dir', 'dwi_path', or 'fod_path' column"
+        )
 
     # Extract covariates (everything except subject, site, *_path, mask_path)
     skip = {"subject", "site", "dwi_path", "fod_path", "mask_path", "rish_dir"}
@@ -218,11 +223,22 @@ def cmd_compute_scale_maps(args):
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Validate matching orders per shell (consistent lmax)
     all_scale_maps = {}
     for b_value in sorted(ref_rish.keys()):
         if b_value not in target_rish:
             print(f"  Warning: b={b_value} not in target, skipping")
             continue
+
+        ref_orders = set(ref_rish[b_value].keys())
+        target_orders = set(target_rish[b_value].keys())
+        if ref_orders != target_orders:
+            raise ValueError(
+                f"b={b_value}: reference has orders {sorted(ref_orders)} "
+                f"but target has {sorted(target_orders)}. "
+                f"Use --consistent-with during extract-native-rish to "
+                f"ensure all subjects use the same lmax."
+            )
 
         shell_dir = str(output_dir / f"b{b_value}")
         scale_maps = compute_scale_maps(
@@ -476,6 +492,156 @@ def cmd_rish_glm(args):
                     )
                     print(f"  Harmonized: {subjects[j]} -> {harm_output}")
 
+    elif mode == "signal_rish":
+        from ..core.harmonize import load_rish_dir
+        from ..core.rish_glm import (
+            fit_rish_glm_per_shell,
+            compute_glm_scale_maps_per_shell,
+        )
+        import subprocess
+
+        if args.harmonize:
+            print(
+                "Error: In signal_rish mode, scale maps are computed in "
+                "template space. Warp them to native space and use "
+                "`apply-harmonization` instead.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        output_dir = Path(args.output)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Load pre-extracted template-space RISH for each subject
+        print("Loading template-space RISH directories...")
+        rish_by_subject = []
+        for i, rish_dir_path in enumerate(image_paths):
+            rish = load_rish_dir(rish_dir_path)
+            if not rish:
+                raise ValueError(
+                    f"No RISH features found in {rish_dir_path} "
+                    f"for subject {subjects[i]}"
+                )
+            rish_by_subject.append(rish)
+            print(f"  [{i+1}/{len(image_paths)}] {subjects[i]}: "
+                  f"{sorted(rish.keys())} shells")
+
+        # Validate RISH consistency: same shells and orders across subjects
+        ref_shells = set(rish_by_subject[0].keys())
+        ref_orders = {
+            b: set(orders.keys())
+            for b, orders in rish_by_subject[0].items()
+        }
+        for i, rish in enumerate(rish_by_subject[1:], 1):
+            if set(rish.keys()) != ref_shells:
+                raise ValueError(
+                    f"Subject {subjects[i]} has shells {sorted(rish.keys())} "
+                    f"but subject {subjects[0]} has {sorted(ref_shells)}. "
+                    f"All subjects must have the same b-shells."
+                )
+            for b in ref_shells:
+                if set(rish[b].keys()) != ref_orders[b]:
+                    raise ValueError(
+                        f"Subject {subjects[i]} b={b} has orders "
+                        f"{sorted(rish[b].keys())} but subject {subjects[0]} "
+                        f"has {sorted(ref_orders[b])}. "
+                        f"Use --consistent-with during extract-native-rish."
+                    )
+
+        # Validate image dimensions match across subjects per (shell, order)
+        print("Validating image dimensions...")
+        for b in sorted(ref_shells):
+            for order in sorted(ref_orders[b]):
+                first_path = rish_by_subject[0][b][order]
+                result = subprocess.run(
+                    ["mrinfo", "-size", first_path],
+                    capture_output=True, text=True,
+                )
+                ref_size = result.stdout.strip()
+                for i, rish in enumerate(rish_by_subject[1:], 1):
+                    result = subprocess.run(
+                        ["mrinfo", "-size", rish[b][order]],
+                        capture_output=True, text=True,
+                    )
+                    subj_size = result.stdout.strip()
+                    if subj_size != ref_size:
+                        raise ValueError(
+                            f"Image dimension mismatch at b={b} l={order}: "
+                            f"{subjects[0]} has size [{ref_size}] but "
+                            f"{subjects[i]} has [{subj_size}]. "
+                            f"Ensure all RISH images are warped to the same "
+                            f"template grid."
+                        )
+
+        # Build rish_paths: {b_value: {order: [sub0.mif, sub1.mif, ...]}}
+        rish_paths: Dict[int, Dict[int, List[str]]] = {}
+        for b in sorted(ref_shells):
+            rish_paths[b] = {}
+            for order in sorted(ref_orders[b]):
+                rish_paths[b][order] = [
+                    rish_by_subject[i][b][order]
+                    for i in range(len(rish_by_subject))
+                ]
+
+        # Fit RISH-GLM per shell
+        print("Fitting RISH-GLM per shell...")
+        glm_result = fit_rish_glm_per_shell(
+            rish_image_paths=rish_paths,
+            site_labels=site_labels,
+            mask_path=mask,
+            output_dir=str(output_dir / "glm"),
+            reference_site=args.reference_site,
+            covariates=covariates if covariates else None,
+        )
+
+        # Save shell_lmax metadata (inferred from RISH orders)
+        shell_lmax = {b: max(ref_orders[b]) for b in sorted(ref_shells)}
+        lmax_meta = {"shell_lmax": {str(b): l for b, l in shell_lmax.items()}}
+        with open(output_dir / "glm" / "shell_lmax.json", "w") as f:
+            json.dump(lmax_meta, f, indent=2)
+
+        print(f"RISH-GLM model saved to: {output_dir / 'glm'}")
+
+        # Compute template-space scale maps for each target site
+        unique_sites = sorted(set(site_labels))
+        target_sites = [s for s in unique_sites if s != args.reference_site]
+
+        for target_site in target_sites:
+            print(f"Computing scale maps for site: {target_site}")
+            scale_dir = output_dir / "scale_maps" / target_site
+            scale_maps = compute_glm_scale_maps_per_shell(
+                result=glm_result,
+                target_site=target_site,
+                output_dir=str(scale_dir),
+                mask=mask,
+                smoothing_fwhm=args.smoothing,
+                clip_range=(args.clip_min, args.clip_max),
+                n_threads=args.threads,
+            )
+
+            # Save scale_maps_meta.json for apply-harmonization compatibility
+            meta = {
+                "scale_maps": {
+                    str(b): {str(o): p for o, p in orders.items()}
+                    for b, orders in scale_maps.items()
+                }
+            }
+            with open(scale_dir / "scale_maps_meta.json", "w") as f:
+                json.dump(meta, f, indent=2)
+
+            print(f"  Scale maps saved to: {scale_dir}")
+
+        # Print next-steps instructions
+        print("\n--- Next steps ---")
+        print("1. Warp scale maps from template to native space for each "
+              "target-site subject")
+        print("2. Re-mask in native space (set background voxels to 1.0):")
+        print('   mrcalc scale.mif native_mask.mif -mult '
+              'native_mask.mif 1 -sub -neg -add scale.mif -force')
+        print("3. Run: rish-harmonize apply-harmonization dwi.mif "
+              "--scale-maps native_scale_maps/ -o dwi_harmonized.mif "
+              "--lmax-json shell_lmax.json")
+
     elif mode == "fod":
         from ..core.rish import extract_rish_features
         from ..core.rish_glm import fit_rish_glm, compute_glm_scale_maps
@@ -696,7 +862,7 @@ def build_parser():
                     help="CSV with columns: subject, site, dwi_path/fod_path, [covariates]")
     p.add_argument("--reference-site", required=True,
                     help="Name of the reference site")
-    p.add_argument("--mode", choices=["signal", "fod"],
+    p.add_argument("--mode", choices=["signal", "signal_rish", "fod"],
                     help="Mode (auto-detected from manifest if not specified)")
     p.add_argument("--mask", help="Group brain mask")
     p.add_argument("-o", "--output", required=True, help="Output directory")

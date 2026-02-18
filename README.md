@@ -63,12 +63,16 @@ rish-harmonize compute-scale-maps \
     --mask template_mask.mif
 ```
 
-**Step 5: Warp scale maps back to native space** (user-provided inverse registration):
+**Step 5: Warp scale maps back to native space** and re-mask (interpolation at boundaries needs cleanup):
 
 ```bash
 for f in sub01/scale_maps_template/b3000/scale_l*.mif; do
-    mrtransform "$f" -linear affine.txt -inverse -template native_grid.mif \
-        -interp linear "sub01/scale_maps_native/b3000/$(basename $f)"
+    out="sub01/scale_maps_native/b3000/$(basename $f)"
+    mrtransform "$f" -linear affine.txt -inverse -template native_mask.mif \
+        -interp linear "$out"
+    # Re-mask: brain = warped value, background = 1.0
+    mrcalc "$out" native_mask.mif -mult \
+        native_mask.mif 1 -sub -neg -add "$out" -force
 done
 ```
 
@@ -83,26 +87,28 @@ rish-harmonize apply-harmonization dwi.mif \
 
 ### RISH-GLM (joint site + covariate model)
 
-For multi-site studies without matched cohorts:
+For multi-site studies without matched cohorts. Supports pre-extracted
+template-space RISH (`rish_dir`) for the native↔template signal workflow:
+
+```csv
+subject,site,rish_dir,age,sex
+sub-01,SiteA,/data/template_rish/sub-01/,25.0,0
+sub-02,SiteB,/data/template_rish/sub-02/,30.0,1
+```
 
 ```bash
 rish-harmonize rish-glm \
-    --manifest manifest.csv \
+    --manifest manifest_rish.csv \
     --reference-site SiteA \
     --mask group_mask.mif \
-    -o output/ \
-    --harmonize
+    -o output/
 ```
 
-**Manifest CSV format:**
+This outputs template-space scale maps. Warp them to native space, re-mask,
+and apply with `apply-harmonization`. See `workflow.md` for full details.
 
-```csv
-subject,site,dwi_path,age,sex
-sub-01,SiteA,/data/siteA/sub-01/dwi_reg.mif,32.5,0
-sub-02,SiteB,/data/siteB/sub-02/dwi_reg.mif,45.1,1
-```
-
-Use `fod_path` instead of `dwi_path` for FOD-level mode.
+For FOD-level mode, use `fod_path` in the manifest and add `--harmonize`
+for direct harmonization in template space.
 
 ## Commands
 

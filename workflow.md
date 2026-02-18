@@ -47,9 +47,14 @@ rish-harmonize extract-native-rish dwi.mif \
 ```
 
 `--consistent-with` takes a text file listing all DWI images across all
-subjects. It computes the minimum number of directions per shell across all
-subjects and derives a consistent lmax, so that every subject uses the same
-SH basis.
+subjects (both reference and target sites). It computes the minimum number
+of directions per shell across all subjects and derives a consistent lmax,
+so that every subject uses the same SH basis.
+
+**This is critical**: all subjects must use the same lmax per shell so that
+their RISH features have the same number of orders and are directly
+comparable. Downstream steps (`create-template`, `compute-scale-maps`) will
+reject inputs with mismatched orders.
 
 Output structure:
 
@@ -123,12 +128,20 @@ clipped to prevent extreme corrections.
 
 ### Step 5: Warp scale maps back to native space
 
+Warp scale maps to native space, then re-mask. Re-masking is needed because
+interpolation at brain boundaries creates artifacts; we reset background
+voxels to 1.0 (no scaling) using the native mask.
+
 ```bash
 for f in sub01/scale_maps_template/b3000/scale_l*.mif; do
+    out="sub01/scale_maps_native/b3000/$(basename $f)"
+    # Inverse warp
     mrtransform "$f" \
         -warp template2native_warp.mif \
-        -interp linear \
-        "sub01/scale_maps_native/b3000/$(basename $f)"
+        -interp linear "$out"
+    # Re-mask: brain = warped value, background = 1.0
+    mrcalc "$out" native_mask.mif -mult \
+        native_mask.mif 1 -sub -neg -add "$out" -force
 done
 ```
 
@@ -182,7 +195,53 @@ rish-harmonize harmonize \
 ## RISH-GLM (joint model with covariates)
 
 For multi-site studies with confounding variables (age, sex, etc.), use the
-RISH-GLM approach which fits a joint model:
+RISH-GLM approach which fits a joint model.
+
+### Signal-level (native↔template workflow)
+
+Use a manifest with `rish_dir` pointing to pre-extracted template-space RISH
+directories (from `extract-native-rish` + warping to template):
+
+```csv
+subject,site,rish_dir,age,sex
+sub-01,SiteA,/data/template_rish/sub-01/,25.0,0
+sub-02,SiteB,/data/template_rish/sub-02/,30.0,1
+```
+
+```bash
+rish-harmonize rish-glm \
+    --manifest manifest_rish.csv \
+    --reference-site SiteA \
+    --mask group_mask.mif \
+    -o output/
+```
+
+This fits the GLM in template space and outputs template-space scale maps
+per target site. Then warp scale maps to native space, re-mask, and apply:
+
+```bash
+# Warp scale maps to native space
+for f in output/scale_maps/SiteB/b3000/scale_l*.mif; do
+    out="native_scale_maps/b3000/$(basename $f)"
+    mrtransform "$f" -warp template2native_warp.mif -interp linear "$out"
+    mrcalc "$out" native_mask.mif -mult \
+        native_mask.mif 1 -sub -neg -add "$out" -force
+done
+
+# Apply in native space
+rish-harmonize apply-harmonization dwi.mif \
+    --scale-maps native_scale_maps/ \
+    -o dwi_harmonized.mif \
+    --lmax-json output/glm/shell_lmax.json
+```
+
+Note: `--harmonize` is not supported in `signal_rish` mode since scale maps
+are in template space and must be warped back to native before application.
+
+### FOD-level (single-space workflow)
+
+For FOD-level mode, everything is in template space and `--harmonize`
+applies harmonization directly:
 
 ```bash
 rish-harmonize rish-glm \
@@ -193,5 +252,5 @@ rish-harmonize rish-glm \
     --harmonize
 ```
 
-The manifest CSV should have columns: `subject`, `site`, `dwi_path` (or
-`fod_path`), and any covariates (e.g. `age`, `sex`).
+The manifest CSV should have columns: `subject`, `site`, `fod_path`,
+and any covariates (e.g. `age`, `sex`).

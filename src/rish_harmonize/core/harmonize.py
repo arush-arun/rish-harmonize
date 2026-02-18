@@ -604,6 +604,29 @@ def create_reference_template_signal(
 
     n_subjects = len(rish_by_subject)
 
+    # Validate consistent shells and orders across all subjects
+    ref_shells = set(rish_by_subject[0].keys())
+    ref_orders_per_shell = {
+        b: set(orders.keys()) for b, orders in rish_by_subject[0].items()
+    }
+    for i, subj_rish in enumerate(rish_by_subject[1:], 1):
+        subj_shells = set(subj_rish.keys())
+        if subj_shells != ref_shells:
+            raise ValueError(
+                f"Subject {i} has shells {sorted(subj_shells)} but subject 0 "
+                f"has {sorted(ref_shells)}. All subjects must have the same "
+                f"shells. Use --consistent-with during extract-native-rish."
+            )
+        for b in ref_shells:
+            subj_orders = set(subj_rish[b].keys())
+            if subj_orders != ref_orders_per_shell[b]:
+                raise ValueError(
+                    f"Subject {i}, b={b}: has orders {sorted(subj_orders)} "
+                    f"but subject 0 has {sorted(ref_orders_per_shell[b])}. "
+                    f"All subjects must use the same lmax per shell. "
+                    f"Use --consistent-with during extract-native-rish."
+                )
+
     # Collect all RISH paths: rish_images[b_value][order] = [path0, path1, ...]
     rish_images: Dict[int, Dict[int, List[str]]] = {}
     for subj_rish in rish_by_subject:

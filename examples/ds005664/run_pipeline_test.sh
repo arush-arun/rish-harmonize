@@ -186,22 +186,29 @@ echo "================================================================"
 
 for SUBJ in "${SUBJECTS[@]}"; do
     AFFINE="$PROC/$SUBJ/$TARGET_SITE/affine.txt"
-    NATIVE_GRID="$PROC/$SUBJ/$TARGET_SITE/mask.mif"
+    NATIVE_MASK="$PROC/$SUBJ/$TARGET_SITE/mask.mif"
     for BDIR in "$OUT/scale_maps_template/$SUBJ"/b*/; do
         BVAL=$(basename "$BDIR")
         NATIVE_SCALE_DIR="$OUT/scale_maps_native/$SUBJ/$BVAL"
         mkdir -p "$NATIVE_SCALE_DIR"
         for SCALE_FILE in "$BDIR"/scale_l*.mif; do
             FNAME=$(basename "$SCALE_FILE")
+            OUTFILE="$NATIVE_SCALE_DIR/$FNAME"
+            # Inverse warp scale map to native space
             mrtransform "$SCALE_FILE" \
                 -linear "$AFFINE" -inverse \
-                -template "$NATIVE_GRID" \
+                -template "$NATIVE_MASK" \
                 -interp linear \
-                "$NATIVE_SCALE_DIR/$FNAME" \
+                "$OUTFILE" \
                 -force -quiet
+            # Re-mask: set brain voxels to warped value, background to 1.0
+            # scale_native = warped * mask + 1.0 * (1 - mask)
+            mrcalc "$OUTFILE" "$NATIVE_MASK" -mult \
+                "$NATIVE_MASK" 1 -sub -neg -add \
+                "$OUTFILE" -force -quiet
         done
     done
-    echo "  [$SUBJ] Warped"
+    echo "  [$SUBJ] Warped + re-masked"
 done
 
 # Create scale_maps_meta.json for each subject's native scale maps

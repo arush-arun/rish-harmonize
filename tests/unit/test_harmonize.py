@@ -9,6 +9,7 @@ from rish_harmonize.core.harmonize import (
     apply_harmonization,
     harmonize_fod,
     compute_consistent_lmax,
+    create_reference_template_signal,
     extract_native_rish,
     load_rish_dir,
 )
@@ -68,6 +69,30 @@ class TestComputeConsistentLmax:
         # User requests lmax=4, data supports 8 -> use 4
         result = compute_consistent_lmax(["dwi.mif"], lmax=4)
         assert result[1000] == 4
+
+
+class TestCreateTemplateValidation:
+    """Test lmax consistency validation in create_reference_template_signal."""
+
+    def test_mismatched_shells_raises(self, tmp_path):
+        """Should raise if subjects have different b-value shells."""
+        subj0 = {1000: {0: "r0.mif", 2: "r2.mif"}, 3000: {0: "r0.mif"}}
+        subj1 = {1000: {0: "r0.mif", 2: "r2.mif"}}  # missing b=3000
+
+        with pytest.raises(ValueError, match="shells"):
+            create_reference_template_signal(
+                [subj0, subj1], str(tmp_path / "template")
+            )
+
+    def test_mismatched_orders_raises(self, tmp_path):
+        """Should raise if subjects have different lmax (orders) per shell."""
+        subj0 = {1000: {0: "r0.mif", 2: "r2.mif", 4: "r4.mif"}}  # lmax=4
+        subj1 = {1000: {0: "r0.mif", 2: "r2.mif"}}  # lmax=2
+
+        with pytest.raises(ValueError, match="orders"):
+            create_reference_template_signal(
+                [subj0, subj1], str(tmp_path / "template")
+            )
 
 
 class TestApplyHarmonizationValidation:

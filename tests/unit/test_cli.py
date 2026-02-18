@@ -121,6 +121,18 @@ class TestParser:
         assert args.harmonize is True
         assert args.threads == 8
 
+    def test_rish_glm_signal_rish_mode(self):
+        args = self.parser.parse_args([
+            "rish-glm",
+            "--manifest", "manifest.csv",
+            "--reference-site", "SiteA",
+            "--mode", "signal_rish",
+            "--mask", "mask.mif",
+            "-o", "output/",
+        ])
+        assert args.mode == "signal_rish"
+        assert args.harmonize is False
+
     def test_site_effect(self):
         args = self.parser.parse_args([
             "site-effect",
@@ -183,5 +195,45 @@ class TestLoadManifest:
         f = tmp_path / "manifest.csv"
         f.write_text("subject,site\nsub-01,A\n")
 
-        with pytest.raises(ValueError, match="must have 'dwi_path' or 'fod_path'"):
+        with pytest.raises(ValueError, match="must have 'rish_dir', 'dwi_path', or 'fod_path'"):
             _load_manifest(str(f))
+
+    def test_rish_dir_manifest(self, tmp_path):
+        f = tmp_path / "manifest.csv"
+        f.write_text(
+            "subject,site,rish_dir\n"
+            "sub-01,SiteA,/data/template_rish/sub-01/\n"
+            "sub-02,SiteB,/data/template_rish/sub-02/\n"
+        )
+
+        subjects, sites, paths, covs, masks, mode = _load_manifest(str(f))
+        assert mode == "signal_rish"
+        assert paths == ["/data/template_rish/sub-01/", "/data/template_rish/sub-02/"]
+        assert subjects == ["sub-01", "sub-02"]
+        assert sites == ["SiteA", "SiteB"]
+
+    def test_rish_dir_with_covariates(self, tmp_path):
+        f = tmp_path / "manifest.csv"
+        f.write_text(
+            "subject,site,rish_dir,age,sex\n"
+            "sub-01,SiteA,/data/rish/sub-01/,25.0,0\n"
+            "sub-02,SiteB,/data/rish/sub-02/,30.0,1\n"
+        )
+
+        _, _, _, covs, _, mode = _load_manifest(str(f))
+        assert mode == "signal_rish"
+        assert "age" in covs
+        assert covs["age"] == [25.0, 30.0]
+        assert "sex" in covs
+        assert covs["sex"] == [0.0, 1.0]
+
+    def test_rish_dir_takes_priority(self, tmp_path):
+        f = tmp_path / "manifest.csv"
+        f.write_text(
+            "subject,site,rish_dir,dwi_path\n"
+            "sub-01,SiteA,/data/rish/sub-01/,/data/dwi/sub-01.mif\n"
+        )
+
+        _, _, paths, _, _, mode = _load_manifest(str(f))
+        assert mode == "signal_rish"
+        assert paths == ["/data/rish/sub-01/"]
