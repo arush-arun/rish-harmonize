@@ -122,6 +122,7 @@ class TestDetectShells:
 class TestSeparateShell:
     @patch("rish_harmonize.core.shells._run_cmd")
     def test_missing_shell_raises(self, mock_run):
+        """Validation rejects b-values not present in shell_info."""
         info = ShellInfo(
             b_values=[1000],
             shell_indices={1000: [1, 2, 3]},
@@ -132,6 +133,7 @@ class TestSeparateShell:
 
     @patch("rish_harmonize.core.shells._run_cmd")
     def test_include_b0(self, mock_run, tmp_path):
+        """With include_b0=True, dwiextract uses -shells 0,<bvalue>."""
         info = ShellInfo(
             b_values=[1000],
             shell_indices={1000: [2, 3, 4]},
@@ -140,16 +142,14 @@ class TestSeparateShell:
         output = str(tmp_path / "shell.mif")
         separate_shell("in.mif", info, 1000, output, include_b0=True)
 
-        # Check mrconvert was called with b0 + shell indices
         call_args = mock_run.call_args[0][0]
-        assert "mrconvert" in call_args
-        coord_idx = call_args.index("-coord")
-        coord_str = call_args[coord_idx + 2]
-        indices = [int(x) for x in coord_str.split(",")]
-        assert indices == [0, 1, 2, 3, 4]
+        assert "dwiextract" in call_args
+        shells_idx = call_args.index("-shells")
+        assert call_args[shells_idx + 1] == "0,1000"
 
     @patch("rish_harmonize.core.shells._run_cmd")
     def test_exclude_b0(self, mock_run, tmp_path):
+        """With include_b0=False, dwiextract uses -shells <bvalue> only."""
         info = ShellInfo(
             b_values=[1000],
             shell_indices={1000: [2, 3, 4]},
@@ -159,10 +159,37 @@ class TestSeparateShell:
         separate_shell("in.mif", info, 1000, output, include_b0=False)
 
         call_args = mock_run.call_args[0][0]
-        coord_idx = call_args.index("-coord")
-        coord_str = call_args[coord_idx + 2]
-        indices = [int(x) for x in coord_str.split(",")]
-        assert indices == [2, 3, 4]
+        assert "dwiextract" in call_args
+        shells_idx = call_args.index("-shells")
+        assert call_args[shells_idx + 1] == "1000"
+
+    @patch("rish_harmonize.core.shells._run_cmd")
+    def test_shell_info_none_skips_validation(self, mock_run, tmp_path):
+        """When shell_info is None, no validation and dwiextract still runs."""
+        output = str(tmp_path / "shell.mif")
+        separate_shell("in.mif", None, 1000, output, include_b0=False)
+
+        call_args = mock_run.call_args[0][0]
+        assert "dwiextract" in call_args
+        shells_idx = call_args.index("-shells")
+        assert call_args[shells_idx + 1] == "1000"
+
+    @patch("rish_harmonize.core.shells._run_cmd")
+    def test_threading(self, mock_run, tmp_path):
+        """Thread option is passed to dwiextract."""
+        info = ShellInfo(
+            b_values=[1000],
+            shell_indices={1000: [2, 3, 4]},
+            b0_indices=[0, 1],
+        )
+        output = str(tmp_path / "shell.mif")
+        separate_shell("in.mif", info, 1000, output,
+                       include_b0=False, n_threads=4)
+
+        call_args = mock_run.call_args[0][0]
+        assert "-nthreads" in call_args
+        nt_idx = call_args.index("-nthreads")
+        assert call_args[nt_idx + 1] == "4"
 
 
 class TestExtractB0:

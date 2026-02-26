@@ -153,7 +153,7 @@ def detect_shells(
 
 def separate_shell(
     dwi_image: str,
-    shell_info: ShellInfo,
+    shell_info: Optional[ShellInfo],
     b_value: int,
     output: str,
     include_b0: bool = True,
@@ -161,12 +161,17 @@ def separate_shell(
 ) -> str:
     """Extract a single b-shell from multi-shell DWI.
 
+    Uses MRtrix3's dwiextract for shell separation, which handles
+    b-value matching internally via the gradient table.
+
     Parameters
     ----------
     dwi_image : str
         Input multi-shell DWI.
-    shell_info : ShellInfo
-        Shell information from detect_shells().
+    shell_info : ShellInfo or None
+        Shell information from detect_shells(). Used only for
+        validation (checking b_value exists). If None, validation
+        is skipped and dwiextract handles matching.
     b_value : int
         Target b-value shell.
     output : str
@@ -181,26 +186,22 @@ def separate_shell(
     str
         Path to extracted single-shell image.
     """
-    if b_value not in shell_info.shell_indices:
+    if shell_info is not None and b_value not in shell_info.shell_indices:
         raise ValueError(
             f"Shell b={b_value} not found. Available: {shell_info.b_values}"
         )
 
     Path(output).parent.mkdir(parents=True, exist_ok=True)
-
-    # Build volume index list
-    indices = []
-    if include_b0:
-        indices.extend(shell_info.b0_indices)
-    indices.extend(shell_info.shell_indices[b_value])
-    indices.sort()
-
-    coord_str = ",".join(str(i) for i in indices)
     thread_opt = ["-nthreads", str(n_threads)] if n_threads > 1 else []
 
+    if include_b0:
+        shells_str = f"0,{b_value}"
+    else:
+        shells_str = str(b_value)
+
     _run_cmd([
-        "mrconvert", dwi_image,
-        "-coord", "3", coord_str,
+        "dwiextract", dwi_image,
+        "-shells", shells_str,
         output, "-force",
     ] + thread_opt)
 
