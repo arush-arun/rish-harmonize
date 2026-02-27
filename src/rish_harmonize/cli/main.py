@@ -735,16 +735,17 @@ def cmd_site_effect(args):
             site_map[site].append(path)
 
     result = test_site_effect(
-        site_image_paths=site_map,
+        image_paths=site_map,
         mask_path=args.mask,
         output_dir=args.output,
         n_permutations=args.n_permutations,
-        n_threads=args.threads,
     )
 
-    print(f"Site effect test complete. Results in: {args.output}")
-    if hasattr(result, "significant_fraction"):
-        print(f"  Fraction of significant voxels: {result.significant_fraction:.4f}")
+    print(f"\nSite effect test complete. Results in: {args.output}")
+    print(f"  Significant voxels (permutation p<0.05): "
+          f"{result.percent_significant_permutation:.1f}%")
+    print(f"  Mean effect size (eta²): {result.mean_effect_size:.4f}")
+    print(f"  Median effect size (eta²): {result.median_effect_size:.4f}")
 
 
 # ---------------------------------------------------------------------------
@@ -887,7 +888,6 @@ def build_parser():
     p.add_argument("-o", "--output", required=True, help="Output directory")
     p.add_argument("--n-permutations", type=int, default=5000,
                     help="Number of permutations (default: 5000)")
-    p.add_argument("--threads", type=int, default=1, help="Number of threads")
     p.set_defaults(func=cmd_site_effect)
 
     return parser
