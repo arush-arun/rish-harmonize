@@ -4,7 +4,7 @@ RISH harmonization for multi-site diffusion MRI data.
 
 Implements Rotationally Invariant Spherical Harmonic (RISH) harmonization with two modes:
 
-- **Signal-level SH** (recommended): Fits spherical harmonics directly to the DWI signal at each b-shell, following [De Luca et al. 2025](https://doi.org/10.1002/mrm.30467) and [Mirzaalian et al. 2016](https://doi.org/10.1016/j.neuroimage.2016.04.041). Captures shell-specific scanner effects.
+- **Signal-level SH** (recommended): Fits spherical harmonics directly to the DWI signal at each b-shell, following [De Luca et al. 2025](https://pubmed.ncbi.nlm.nih.gov/40407799/) 
 - **FOD-level**: Operates on fiber orientation distribution (FOD) images from constrained spherical deconvolution (CSD).
 
 Supports both template-based harmonization (reference site averaging) and RISH-GLM joint modeling (no matched cohorts required).
