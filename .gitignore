@@ -8,3 +8,6 @@ build/
 *.nii
 *.nii.gz
 .pytest_cache/
+
+# Local config files with real subject IDs
+examples/ukb/*.local.sh

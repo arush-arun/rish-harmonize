@@ -36,7 +36,11 @@ set -euo pipefail
 
 # Source Bunya config (loads modules, sets paths, defines helpers)
 SCRIPT_DIR="/scratch/user/uqahonne/ukb/bed_analysis/rish_harmonize"
-source "$SCRIPT_DIR/config_bunya.sh"
+if [[ -f "$SCRIPT_DIR/config_bunya.local.sh" ]]; then
+    source "$SCRIPT_DIR/config_bunya.local.sh"
+else
+    source "$SCRIPT_DIR/config_bunya.sh"
+fi
 
 OUT="/scratch/user/uqahonne/ukb/bed_analysis/rish_harmonize/pipeline_output_fod"
 mkdir -p "$OUT"

@@ -23,7 +23,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$SCRIPT_DIR/config.sh"
+if [[ -f "$SCRIPT_DIR/config.local.sh" ]]; then
+    source "$SCRIPT_DIR/config.local.sh"
+else
+    source "$SCRIPT_DIR/config.sh"
+fi
 
 OUT="/home/uqahonne/uq/rish-harmonize/examples/ukb/pipeline_output_fod"
 mkdir -p "$OUT"
