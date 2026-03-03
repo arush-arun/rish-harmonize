@@ -815,10 +815,13 @@ def cmd_site_effect(args):
 # ---------------------------------------------------------------------------
 
 def build_parser():
+    from .. import __version__
+
     parser = argparse.ArgumentParser(
         prog="rish-harmonize",
         description="RISH harmonization for multi-site diffusion MRI",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     # -- detect-shells --
