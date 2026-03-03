@@ -30,7 +30,7 @@ set -euo pipefail
 
 PROJECT="/scratch/user/uqahonne/ukb/bed_analysis/rish_harmonize"
 RISH_REPO="$PROJECT/repo"
-OUT="$PROJECT/pipeline_output_fa"
+OUT="$PROJECT/pipeline_output_fod"
 MASK="$OUT/template_masks/group_mask.mif"
 NTHREADS=${SLURM_CPUS_PER_TASK:-8}
 PASS=0
@@ -42,35 +42,35 @@ green() { echo -e "\033[32m$*\033[0m"; }
 red()   { echo -e "\033[31m$*\033[0m"; }
 
 check() {
-    ((TOTAL++))
+    ((TOTAL++)) || true
     if "$@"; then
-        ((PASS++))
+        ((PASS++)) || true
         green "  [PASS] $*"
     else
-        ((FAIL++))
+        ((FAIL++)) || true
         red "  [FAIL] $*"
     fi
 }
 
 check_file() {
-    ((TOTAL++))
+    ((TOTAL++)) || true
     if [[ -f "$1" ]]; then
-        ((PASS++))
+        ((PASS++)) || true
         green "  [PASS] File exists: $(basename "$1")"
     else
-        ((FAIL++))
+        ((FAIL++)) || true
         red "  [FAIL] File missing: $1"
     fi
 }
 
 check_json_key() {
     local FILE=$1 KEY=$2
-    ((TOTAL++))
+    ((TOTAL++)) || true
     if python3 -c "import json; d=json.load(open('$FILE')); assert '$KEY' in d, f'key $KEY not found'" 2>/dev/null; then
-        ((PASS++))
+        ((PASS++)) || true
         green "  [PASS] $KEY in $(basename "$FILE")"
     else
-        ((FAIL++))
+        ((FAIL++)) || true
         red "  [FAIL] $KEY not in $(basename "$FILE")"
     fi
 }
@@ -110,7 +110,7 @@ echo "  MRtrix3: $(mrinfo --version 2>&1 | head -1)"
 # Verify existing pipeline output exists
 if [[ ! -d "$OUT/template_rish" ]]; then
     echo "ERROR: Pipeline output not found at $OUT/template_rish"
-    echo "  Run the full FA pipeline first (sbatch submit_fa_pipeline.slurm)"
+    echo "  Run the full FOD pipeline first"
     exit 1
 fi
 if [[ ! -f "$MASK" ]]; then
@@ -190,11 +190,11 @@ for order, stats in diag.items():
     fi
 done
 
-# Check per-subject QC files
+# Check per-subject QC files (only produced in 'signal' mode, not 'signal_rish')
 echo ""
 echo "--- Checking per-subject QC ---"
-for QC_FILE in "$GLM_OUT"/qc_subjects_b*.json; do
-    if [[ -f "$QC_FILE" ]]; then
+if ls "$GLM_OUT"/qc_subjects_b*.json &>/dev/null; then
+    for QC_FILE in "$GLM_OUT"/qc_subjects_b*.json; do
         check_file "$QC_FILE"
         echo "  $(basename "$QC_FILE"):"
         python3 -c "
@@ -202,18 +202,15 @@ import json
 with open('$QC_FILE') as f:
     qc = json.load(f)
 print(f'    Subjects: {qc[\"n_subjects\"]}, Flagged: {qc[\"n_flagged\"]}')
-if qc['flagged_subjects']:
+if qc.get('flagged_subjects'):
     for s in qc['flagged_subjects']:
-        print(f'    WARNING: {s[\"subject_id\"]} (site {s[\"site\"]}): {s[\"flags\"]}')
+        print(f'    WARNING: {s}')
 else:
     print('    No outliers flagged')
 "
-    fi
-done
-# If no QC files found at all
-if ! ls "$GLM_OUT"/qc_subjects_b*.json &>/dev/null; then
-    ((TOTAL++)); ((FAIL++))
-    red "  [FAIL] No qc_subjects_*.json files found"
+    done
+else
+    echo "  [SKIP] No qc_subjects_*.json (expected: signal_rish mode does not produce per-subject QC)"
 fi
 
 # ==========================================================================
@@ -281,7 +278,7 @@ if [[ -f "$RUN1_JSON" && -f "$RUN2_JSON" ]]; then
     check_json_key "$RUN1_JSON" "provenance"
 
     # Compare key statistics
-    ((TOTAL++))
+    ((TOTAL++)) || true
     MATCH=$(python3 -c "
 import json
 with open('$RUN1_JSON') as f: r1 = json.load(f)
@@ -300,10 +297,10 @@ print('MATCH' if match else 'MISMATCH')
 " 2>&1)
     echo "$MATCH"
     if echo "$MATCH" | grep -q "^MATCH$"; then
-        ((PASS++))
+        ((PASS++)) || true
         green "  [PASS] Deterministic: two runs with seed=42 are identical"
     else
-        ((FAIL++))
+        ((FAIL++)) || true
         red "  [FAIL] Deterministic: runs differ despite same seed"
     fi
 
@@ -319,7 +316,7 @@ print('MATCH' if match else 'MISMATCH')
 
     RUN3_JSON="$EFFECT_DIR/run3/summary.json"
     if [[ -f "$RUN3_JSON" ]]; then
-        ((TOTAL++))
+        ((TOTAL++)) || true
         DIFF=$(python3 -c "
 import json
 with open('$RUN1_JSON') as f: r1 = json.load(f)
@@ -339,10 +336,10 @@ else:
 ")
         echo "$DIFF"
         if echo "$DIFF" | grep -q "DIFFERENT_SEEDS"; then
-            ((PASS++))
+            ((PASS++)) || true
             green "  [PASS] Different seeds recorded correctly"
         else
-            ((FAIL++))
+            ((FAIL++)) || true
             red "  [FAIL] Seeds not recorded differently"
         fi
     fi
