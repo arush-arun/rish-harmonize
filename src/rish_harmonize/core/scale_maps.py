@@ -7,16 +7,98 @@ The scaling factor for order l is:
     scale_l(x) = θ_l_reference(x) / θ_l_target(x)
 """
 
+import json
 import subprocess
 from pathlib import Path
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Tuple
 import tempfile
 import shutil
+
+import numpy as np
 
 
 def run_mrtrix_cmd(cmd: List[str], check: bool = True) -> subprocess.CompletedProcess:
     """Run an MRtrix3 command."""
     return subprocess.run(cmd, capture_output=True, text=True, check=check)
+
+
+def _load_mif_as_array(path: str) -> np.ndarray:
+    """Load a .mif image as a numpy array via mrconvert + nibabel."""
+    import nibabel as nib
+
+    with tempfile.NamedTemporaryFile(suffix=".nii", delete=False) as tmp:
+        nii_path = tmp.name
+    subprocess.run(
+        ["mrconvert", str(path), nii_path, "-datatype", "float32", "-force"],
+        capture_output=True, check=True,
+    )
+    img = nib.load(nii_path)
+    data = np.asarray(img.dataobj, dtype=np.float32)
+    Path(nii_path).unlink()
+    return data
+
+
+def _load_mask_as_array(mask_path: str) -> np.ndarray:
+    """Load a mask image as a boolean numpy array."""
+    data = _load_mif_as_array(mask_path)
+    return data > 0.5
+
+
+def compute_scale_map_diagnostics(
+    scale_map_path: str,
+    mask_path: Optional[str],
+    clip_range: Tuple[float, float],
+    min_signal: float,
+) -> Dict:
+    """Compute diagnostics for a single scale map image.
+
+    Parameters
+    ----------
+    scale_map_path : str
+        Path to the computed scale map image.
+    mask_path : str or None
+        Brain mask. If None, uses all non-zero voxels.
+    clip_range : tuple
+        (min, max) clipping range used during scale map computation.
+    min_signal : float
+        Minimum signal threshold used during computation.
+
+    Returns
+    -------
+    dict
+        Diagnostics including mean, median, std, and clipping percentages.
+    """
+    data = _load_mif_as_array(scale_map_path)
+
+    if mask_path:
+        mask = _load_mask_as_array(mask_path)
+        values = data[mask]
+    else:
+        values = data[data != 0]
+
+    if len(values) == 0:
+        return {"n_voxels": 0, "warning": "no voxels in mask"}
+
+    min_val, max_val = clip_range
+    # Voxels at the clip boundaries (within tolerance)
+    tol = 1e-6
+    n_clipped_min = int(np.sum(np.abs(values - min_val) < tol))
+    n_clipped_max = int(np.sum(np.abs(values - max_val) < tol))
+    n_total = len(values)
+
+    return {
+        "n_voxels": n_total,
+        "mean": float(np.mean(values)),
+        "median": float(np.median(values)),
+        "std": float(np.std(values)),
+        "min": float(np.min(values)),
+        "max": float(np.max(values)),
+        "pct_clipped_min": round(100.0 * n_clipped_min / n_total, 2),
+        "pct_clipped_max": round(100.0 * n_clipped_max / n_total, 2),
+        "pct_clipped_total": round(100.0 * (n_clipped_min + n_clipped_max) / n_total, 2),
+        "clip_range": list(clip_range),
+        "min_signal_threshold": min_signal,
+    }
 
 
 def compute_scale_maps(
@@ -167,7 +249,24 @@ def compute_scale_maps(
                 shutil.copy(clipped, output_file)
             
             scale_maps[l] = str(output_file)
-    
+
+    # Compute and save diagnostics
+    diagnostics = {}
+    for l, path in scale_maps.items():
+        diag = compute_scale_map_diagnostics(path, mask, clip_range, min_signal)
+        diagnostics[f"l{l}"] = diag
+        pct_clip = diag.get("pct_clipped_total", 0)
+        mean_val = diag.get("mean", 0)
+        print(f"  Scale map l={l}: mean={mean_val:.3f}, "
+              f"clipped={pct_clip:.1f}%")
+        if pct_clip > 20:
+            print(f"  WARNING: l={l} has {pct_clip:.1f}% clipped voxels — "
+                  f"check registration and reference/target mismatch")
+
+    diag_path = output_dir / "scale_map_diagnostics.json"
+    with open(diag_path, "w") as f:
+        json.dump(diagnostics, f, indent=2)
+
     return scale_maps
 
 

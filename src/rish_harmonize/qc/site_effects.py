@@ -223,6 +223,7 @@ class SiteEffectResult:
     n_sites: int
     n_voxels: int
     n_permutations: int
+    seed: int
     site_labels: List[str]
     unique_sites: List[str]
 
@@ -260,6 +261,7 @@ class SiteEffectResult:
             "n_sites": self.n_sites,
             "n_voxels": self.n_voxels,
             "n_permutations": self.n_permutations,
+            "seed": self.seed,
             "unique_sites": self.unique_sites,
             "percent_significant_uncorrected": self.percent_significant_uncorrected,
             "percent_significant_fdr": self.percent_significant_fdr,
@@ -502,9 +504,10 @@ def test_site_effect(
     alpha: float = 0.05,
     variance_groups: Optional[Dict[str, int]] = None,
     exchangeability_blocks: Optional[List[int]] = None,
-    seed: Optional[int] = None,
+    seed: int = 42,
     save_maps: bool = True,
-    verbose: bool = True
+    verbose: bool = True,
+    provenance: Optional[Dict] = None,
 ) -> SiteEffectResult:
     """
     Test for site effects using GLM with permutation inference.
@@ -527,8 +530,8 @@ def test_site_effect(
         Site -> variance group index (for heteroscedastic test)
     exchangeability_blocks : list, optional
         Block indices for constrained permutations
-    seed : int, optional
-        Random seed
+    seed : int
+        Random seed for reproducibility (default: 42)
     save_maps : bool
         Whether to save statistical maps
     verbose : bool
@@ -560,6 +563,7 @@ def test_site_effect(
         print(f"  Subjects: {n_subjects}")
         print(f"  Sites: {n_sites} ({', '.join(unique_sites)})")
         print(f"  Permutations: {n_permutations}")
+        print(f"  Seed: {seed}")
 
     # Load data
     if verbose:
@@ -667,6 +671,7 @@ def test_site_effect(
         n_sites=n_sites,
         n_voxels=n_voxels,
         n_permutations=n_permutations,
+        seed=seed,
         site_labels=site_labels,
         unique_sites=unique_sites,
         f_statistic=f_observed,
@@ -731,9 +736,12 @@ def test_site_effect(
         )
 
     # Save summary JSON
+    summary_data = result.to_dict()
+    if provenance is not None:
+        summary_data["provenance"] = provenance
     summary_path = output_dir / "summary.json"
     with open(summary_path, "w") as f:
-        json.dump(result.to_dict(), f, indent=2)
+        json.dump(summary_data, f, indent=2)
 
     if verbose:
         print(f"\nResults saved to: {output_dir}")

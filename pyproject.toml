@@ -23,3 +23,6 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: end-to-end tests requiring MRtrix3 (deselect with '-m \"not integration\"')",
+]

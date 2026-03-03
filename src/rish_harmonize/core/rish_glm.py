@@ -397,6 +397,25 @@ def compute_glm_scale_maps(
             scale_maps[l] = str(output_file)
             result.scale_map_paths[f"{l}_{target_site}"] = str(output_file)
 
+    # Compute and save diagnostics
+    from .scale_maps import compute_scale_map_diagnostics
+
+    diagnostics = {}
+    for l, path in scale_maps.items():
+        diag = compute_scale_map_diagnostics(path, mask, clip_range, min_signal)
+        diagnostics[f"l{l}"] = diag
+        pct_clip = diag.get("pct_clipped_total", 0)
+        mean_val = diag.get("mean", 0)
+        print(f"  Scale map l={l} ({target_site}): mean={mean_val:.3f}, "
+              f"clipped={pct_clip:.1f}%")
+        if pct_clip > 20:
+            print(f"  WARNING: l={l} has {pct_clip:.1f}% clipped voxels — "
+                  f"check registration and reference/target mismatch")
+
+    diag_path = output_dir / "scale_map_diagnostics.json"
+    with open(diag_path, "w") as f:
+        json.dump(diagnostics, f, indent=2)
+
     return scale_maps
 
 

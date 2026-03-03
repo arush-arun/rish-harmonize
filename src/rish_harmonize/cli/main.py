@@ -17,9 +17,49 @@ Signal-level SH workflow:
 import argparse
 import csv
 import json
+import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
+
+
+def _get_provenance() -> Dict:
+    """Collect provenance metadata for output files."""
+    from .. import __version__
+
+    provenance = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "command": " ".join(sys.argv),
+        "rish_harmonize_version": __version__,
+    }
+
+    # MRtrix3 version
+    try:
+        result = subprocess.run(
+            ["mrconvert", "--version"],
+            capture_output=True, text=True, check=False,
+        )
+        output = result.stdout or result.stderr
+        for line in output.splitlines():
+            if line.strip():
+                provenance["mrtrix_version"] = line.strip()
+                break
+    except FileNotFoundError:
+        provenance["mrtrix_version"] = "not found"
+
+    return provenance
+
+
+def _save_json_with_provenance(data: Dict, path, provenance: Optional[Dict] = None) -> None:
+    """Save a JSON file, merging in provenance metadata."""
+    if provenance is None:
+        provenance = _get_provenance()
+    data["provenance"] = provenance
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
 
 
 def _read_list_file(path: str) -> List[str]:
@@ -256,15 +296,14 @@ def cmd_compute_scale_maps(args):
         for order, path in sorted(scale_maps.items()):
             print(f"    l={order}: {path}")
 
-    # Save metadata
+    # Save metadata with provenance
     meta = {
         "scale_maps": {
             str(b): {str(o): p for o, p in orders.items()}
             for b, orders in all_scale_maps.items()
         }
     }
-    with open(output_dir / "scale_maps_meta.json", "w") as f:
-        json.dump(meta, f, indent=2)
+    _save_json_with_provenance(meta, output_dir / "scale_maps_meta.json")
 
     print(f"\nScale maps saved to: {args.output}")
 
@@ -438,6 +477,28 @@ def cmd_rish_glm(args):
 
             print(f"  [{i+1}/{len(image_paths)}] {subjects[i]}")
 
+        # Per-subject QC
+        print("Computing per-subject QC metrics...")
+        from ..qc.subject_qc import compute_rish_subject_stats, save_subject_qc
+
+        for b_value in sorted(rish_paths.keys()):
+            qc_list = compute_rish_subject_stats(
+                rish_image_paths=rish_paths[b_value],
+                subject_ids=subjects,
+                site_labels=site_labels,
+                mask_path=mask,
+            )
+            qc_path = save_subject_qc(
+                qc_list, str(output_dir / f"qc_subjects_b{b_value}.json")
+            )
+            flagged = [q for q in qc_list if q.flags]
+            if flagged:
+                print(f"  b={b_value}: {len(flagged)} subjects flagged:")
+                for q in flagged:
+                    print(f"    {q.subject_id}: {', '.join(q.flags)}")
+            else:
+                print(f"  b={b_value}: no outliers detected")
+
         # Step 2: Fit RISH-GLM per shell
         print("Fitting RISH-GLM per shell...")
         glm_result = fit_rish_glm_per_shell(
@@ -450,9 +511,9 @@ def cmd_rish_glm(args):
         )
 
         # Save consistent lmax alongside GLM model
+        provenance = _get_provenance()
         lmax_meta = {"shell_lmax": {str(b): l for b, l in consistent_lmax.items()}}
-        with open(output_dir / "glm" / "shell_lmax.json", "w") as f:
-            json.dump(lmax_meta, f, indent=2)
+        _save_json_with_provenance(lmax_meta, output_dir / "glm" / "shell_lmax.json", provenance)
 
         print(f"RISH-GLM model saved to: {output_dir / 'glm'}")
 
@@ -595,10 +656,10 @@ def cmd_rish_glm(args):
         )
 
         # Save shell_lmax metadata (inferred from RISH orders)
+        provenance = _get_provenance()
         shell_lmax = {b: max(ref_orders[b]) for b in sorted(ref_shells)}
         lmax_meta = {"shell_lmax": {str(b): l for b, l in shell_lmax.items()}}
-        with open(output_dir / "glm" / "shell_lmax.json", "w") as f:
-            json.dump(lmax_meta, f, indent=2)
+        _save_json_with_provenance(lmax_meta, output_dir / "glm" / "shell_lmax.json", provenance)
 
         print(f"RISH-GLM model saved to: {output_dir / 'glm'}")
 
@@ -626,8 +687,7 @@ def cmd_rish_glm(args):
                     for b, orders in scale_maps.items()
                 }
             }
-            with open(scale_dir / "scale_maps_meta.json", "w") as f:
-                json.dump(meta, f, indent=2)
+            _save_json_with_provenance(meta, scale_dir / "scale_maps_meta.json", provenance)
 
             print(f"  Scale maps saved to: {scale_dir}")
 
@@ -739,6 +799,8 @@ def cmd_site_effect(args):
         mask_path=args.mask,
         output_dir=args.output,
         n_permutations=args.n_permutations,
+        seed=args.seed,
+        provenance=_get_provenance(),
     )
 
     print(f"\nSite effect test complete. Results in: {args.output}")
@@ -888,6 +950,8 @@ def build_parser():
     p.add_argument("-o", "--output", required=True, help="Output directory")
     p.add_argument("--n-permutations", type=int, default=5000,
                     help="Number of permutations (default: 5000)")
+    p.add_argument("--seed", type=int, default=42,
+                    help="Random seed for permutation testing (default: 42)")
     p.set_defaults(func=cmd_site_effect)
 
     return parser
