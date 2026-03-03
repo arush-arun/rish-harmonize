@@ -810,6 +810,48 @@ def cmd_site_effect(args):
     print(f"  Median effect size (eta²): {result.median_effect_size:.4f}")
 
 
+def cmd_qc_report(args):
+    """Generate QC visualization figures from pipeline outputs."""
+    from ..qc.visualize import plot_site_effect_comparison, plot_scale_map_heatmap
+
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    generated = []
+
+    # Site effect comparison bar chart
+    if args.site_effect_dir:
+        try:
+            path = plot_site_effect_comparison(
+                args.site_effect_dir,
+                str(output_dir / "site_effect_comparison.png"),
+                dpi=args.dpi,
+            )
+            print(f"  Site effect comparison: {path}")
+            generated.append(path)
+        except (FileNotFoundError, ImportError) as e:
+            print(f"  Skipping site effect comparison: {e}")
+
+    # Scale map diagnostics heatmaps
+    if args.glm_output:
+        try:
+            paths = plot_scale_map_heatmap(
+                args.glm_output,
+                str(output_dir),
+                dpi=args.dpi,
+            )
+            for p in paths:
+                print(f"  Scale map heatmap: {p}")
+            generated.extend(paths)
+        except (FileNotFoundError, ImportError) as e:
+            print(f"  Skipping scale map heatmap: {e}")
+
+    if not generated:
+        print("No figures generated. Provide --glm-output and/or --site-effect-dir.")
+        sys.exit(1)
+
+    print(f"\nQC report: {len(generated)} figure(s) saved to {output_dir}")
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -956,6 +998,17 @@ def build_parser():
     p.add_argument("--seed", type=int, default=42,
                     help="Random seed for permutation testing (default: 42)")
     p.set_defaults(func=cmd_site_effect)
+
+    # -- qc-report --
+    p = subparsers.add_parser("qc-report",
+                               help="Generate QC visualization figures from pipeline outputs")
+    p.add_argument("--glm-output",
+                    help="GLM output directory (with scale_maps/)")
+    p.add_argument("--site-effect-dir",
+                    help="Site effect comparison directory (with b*/pre/ and b*/post/)")
+    p.add_argument("-o", "--output", required=True, help="Output directory for figures")
+    p.add_argument("--dpi", type=int, default=150, help="Figure DPI (default: 150)")
+    p.set_defaults(func=cmd_qc_report)
 
     return parser
 

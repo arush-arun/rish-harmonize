@@ -30,6 +30,7 @@
 #   8. Run RISH-GLM
 #   9. Verify
 #  10. Site effect comparison (pre vs post harmonization)
+#  11. Apply harmonization to native-space DWI
 # ==========================================================================
 
 set -euo pipefail
@@ -349,6 +350,109 @@ fi
 # ==========================================================================
 if [[ "$STEP" == "all" || "$STEP" == "10" ]]; then
     step_site_effect_comparison "$OUT" "$OUT/template_masks/group_mask.mif"
+fi
+
+# ==========================================================================
+# Step 11: Apply harmonization to native-space DWI
+# ==========================================================================
+if [[ "$STEP" == "all" || "$STEP" == "11" ]]; then
+echo ""
+echo "================================================================"
+echo "  Step 11: Applying harmonization to native DWI"
+echo "================================================================"
+
+GLM_DIR="$OUT/glm_output"
+WARP_DIR="$OUT/warps"
+HARMONIZED_DIR="$OUT/harmonized"
+LMAX_JSON="$GLM_DIR/glm/shell_lmax.json"
+mkdir -p "$HARMONIZED_DIR"
+
+if [[ ! -f "$LMAX_JSON" ]]; then
+    echo "  ERROR: shell_lmax.json not found. Run step 8 first."
+    exit 1
+fi
+
+for SUBJ in "${SUBJECTS[@]}"; do
+    SITE="${SITE_MAP[$SUBJ]}"
+
+    # Skip reference site subjects (no correction needed)
+    if [[ "$SITE" == "$REF_SITE" ]]; then
+        echo "  [$SUBJ] Reference site ($REF_SITE), skipping"
+        continue
+    fi
+
+    HARM_OUT="$HARMONIZED_DIR/$SUBJ/dwi_harmonized.mif"
+    if [[ -f "$HARM_OUT" ]]; then
+        echo "  [$SUBJ] Already harmonized, skipping"
+        continue
+    fi
+
+    SCALE_DIR="$GLM_DIR/scale_maps/$SITE"
+    if [[ ! -d "$SCALE_DIR" ]]; then
+        echo "  [$SUBJ] WARNING: No scale maps for site $SITE, skipping"
+        continue
+    fi
+
+    # Compute inverse deformation field (template -> native)
+    SUBJ_WARP="$WARP_DIR/${SUBJ}.mif"
+    if [[ ! -f "$SUBJ_WARP" ]]; then
+        echo "  [$SUBJ] WARNING: Warp not found, skipping"
+        continue
+    fi
+
+    NATIVE_DEFORM="$HARMONIZED_DIR/$SUBJ/inverse_warp.mif"
+    mkdir -p "$HARMONIZED_DIR/$SUBJ"
+    if [[ ! -f "$NATIVE_DEFORM" ]]; then
+        warpconvert "$SUBJ_WARP" warpfull2deformation \
+            -from 2 \
+            -template "$OUT/mif/$SUBJ/dwi.mif" \
+            "$NATIVE_DEFORM" -force -quiet
+    fi
+
+    # Warp scale maps to native space and re-mask
+    NATIVE_SCALES="$HARMONIZED_DIR/$SUBJ/native_scale_maps"
+    NATIVE_MASK="$OUT/mif/$SUBJ/mask.mif"
+    mkdir -p "$NATIVE_SCALES"
+
+    for BDIR in "$SCALE_DIR"/b*/; do
+        [[ ! -d "$BDIR" ]] && continue
+        BVAL=$(basename "$BDIR")
+        NATIVE_B_DIR="$NATIVE_SCALES/$BVAL"
+        mkdir -p "$NATIVE_B_DIR"
+
+        for SCALE_MIF in "$BDIR"/scale_l*_${SITE}.mif; do
+            [[ ! -f "$SCALE_MIF" ]] && continue
+            FNAME=$(basename "$SCALE_MIF" "_${SITE}.mif")
+            NATIVE_SCALE="$NATIVE_B_DIR/${FNAME}.mif"
+            [[ -f "$NATIVE_SCALE" ]] && continue
+
+            # Warp template-space scale map to native space
+            TMP_WARPED="$NATIVE_B_DIR/${FNAME}_warped.mif"
+            mrtransform "$SCALE_MIF" "$TMP_WARPED" \
+                -warp "$NATIVE_DEFORM" \
+                -interp linear \
+                -nthreads "$NTHREADS" \
+                -force -quiet
+
+            # Re-mask: set background to 1.0 (neutral scaling)
+            mrcalc "$TMP_WARPED" "$NATIVE_MASK" -mult \
+                   "$NATIVE_MASK" 1 -sub -neg -add \
+                   "$NATIVE_SCALE" -force -quiet
+            rm -f "$TMP_WARPED"
+        done
+    done
+
+    # Apply harmonization to DWI
+    rish-harmonize apply-harmonization \
+        "$OUT/mif/$SUBJ/dwi.mif" \
+        --scale-maps "$NATIVE_SCALES" \
+        -o "$HARM_OUT" \
+        --lmax-json "$LMAX_JSON" \
+        --threads "$NTHREADS"
+
+    echo "  [$SUBJ] Harmonized -> $HARM_OUT"
+done
+echo "  Done."
 fi
 
 echo ""

@@ -173,12 +173,15 @@ for SITE_DIR in "$GLM_OUT"/scale_maps/*/; do
         check_json_key "$META" "provenance"
     fi
 
-    # Check scale map diagnostics JSON
-    DIAG="$SITE_DIR/scale_map_diagnostics.json"
-    check_file "$DIAG"
-    if [[ -f "$DIAG" ]]; then
-        echo "  Scale map diagnostics for site $SITE:"
-        python3 -c "
+    # Check scale map diagnostics JSON (saved per b-shell subdirectory)
+    for BDIR in "$SITE_DIR"/b*/; do
+        [[ ! -d "$BDIR" ]] && continue
+        BSHELL=$(basename "$BDIR")
+        DIAG="$BDIR/scale_map_diagnostics.json"
+        check_file "$DIAG"
+        if [[ -f "$DIAG" ]]; then
+            echo "  Scale map diagnostics for site $SITE ($BSHELL):"
+            python3 -c "
 import json
 with open('$DIAG') as f:
     diag = json.load(f)
@@ -187,7 +190,8 @@ for order, stats in diag.items():
     pct_clip = stats.get('pct_clipped_total', 'N/A')
     print(f'    {order}: mean={mean:.3f}, clipped={pct_clip:.1f}%')
 "
-    fi
+        fi
+    done
 done
 
 # Check per-subject QC files (only produced in 'signal' mode, not 'signal_rish')
