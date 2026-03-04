@@ -129,13 +129,13 @@ def compute_scale_map_subject_stats(
     dict
         Per-order statistics of the effective correction.
     """
-    from ..core.scale_maps import _load_mif_as_array, _load_mask_as_array
+    from ..core.scale_maps import load_mif_as_array, load_mask_as_array
 
     stats = {}
-    mask = _load_mask_as_array(mask_path) if mask_path else None
+    mask = load_mask_as_array(mask_path) if mask_path else None
 
     for order in sorted(scale_map_paths.keys()):
-        scale_data = _load_mif_as_array(scale_map_paths[order])
+        scale_data = load_mif_as_array(scale_map_paths[order])
         if mask is not None:
             values = scale_data[mask]
         else:

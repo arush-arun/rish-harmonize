@@ -22,7 +22,7 @@ def run_mrtrix_cmd(cmd: List[str], check: bool = True) -> subprocess.CompletedPr
     return subprocess.run(cmd, capture_output=True, text=True, check=check)
 
 
-def _load_mif_as_array(path: str) -> np.ndarray:
+def load_mif_as_array(path: str) -> np.ndarray:
     """Load a .mif image as a numpy array via mrconvert + nibabel."""
     import nibabel as nib
 
@@ -38,9 +38,9 @@ def _load_mif_as_array(path: str) -> np.ndarray:
     return data
 
 
-def _load_mask_as_array(mask_path: str) -> np.ndarray:
+def load_mask_as_array(mask_path: str) -> np.ndarray:
     """Load a mask image as a boolean numpy array."""
-    data = _load_mif_as_array(mask_path)
+    data = load_mif_as_array(mask_path)
     return data > 0.5
 
 
@@ -68,10 +68,10 @@ def compute_scale_map_diagnostics(
     dict
         Diagnostics including mean, median, std, and clipping percentages.
     """
-    data = _load_mif_as_array(scale_map_path)
+    data = load_mif_as_array(scale_map_path)
 
     if mask_path:
-        mask = _load_mask_as_array(mask_path)
+        mask = load_mask_as_array(mask_path)
         values = data[mask]
     else:
         values = data[data != 0]

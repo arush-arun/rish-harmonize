@@ -186,7 +186,14 @@ def cmd_extract_native_rish(args):
         shell_lmax = {}
         for b in info.b_values:
             auto = determine_lmax(info.n_directions(b))
-            shell_lmax[b] = min(args.lmax, auto)
+            if args.lmax > auto:
+                print(
+                    f"Error: requested lmax={args.lmax} for b={b} but data "
+                    f"only supports lmax={auto} ({info.n_directions(b)} directions).",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            shell_lmax[b] = args.lmax
 
     rish = extract_native_rish(
         args.dwi,
@@ -563,9 +570,11 @@ def cmd_rish_glm(args):
 
         if args.harmonize:
             print(
-                "Error: In signal_rish mode, scale maps are computed in "
-                "template space. Warp them to native space and use "
-                "`apply-harmonization` instead.",
+                "Error: --harmonize is not supported in signal_rish mode "
+                "because this mode has no DWI paths to apply corrections to. "
+                "Scale maps are in template space; to harmonize native-space "
+                "DWIs, warp the scale maps back to native space and use "
+                "`rish-harmonize apply-harmonization` (see README step 11).",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -976,7 +985,9 @@ def build_parser():
     p.add_argument("-o", "--output", required=True, help="Output directory")
     p.add_argument("--lmax", type=int, default=None, help="Maximum SH order")
     p.add_argument("--harmonize", action="store_true",
-                    help="Also harmonize all target-site subjects")
+                    help="Also harmonize all target-site DWIs (signal mode only; "
+                         "in signal_rish mode, warp scale maps to native space "
+                         "and use apply-harmonization instead)")
     p.add_argument("--smoothing", type=float, default=3.0,
                     help="Scale map smoothing FWHM in mm (default: 3.0)")
     p.add_argument("--clip-min", type=float, default=0.5,

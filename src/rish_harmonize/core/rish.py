@@ -194,11 +194,19 @@ def extract_rish_features(
             output_file = output_dir / f"{prefix}_l{l}.mif"
             
             if l == 0:
-                # θ_0 is just the DC component (volume 0)
-                # But we take absolute value for consistency
+                # θ_0 is the DC component (volume 0).
+                # After SH fitting, c_00 can go slightly negative in noisy
+                # boundary voxels.  Take abs to keep RISH non-negative
+                # (consistent with the l>0 definition sqrt(sum(c_lm^2))).
+                dc_tmp = tmpdir / "l0_dc.mif"
                 run_mrtrix_cmd([
                     "mrconvert", str(sh_image),
                     "-coord", "3", "0",
+                    str(dc_tmp),
+                    "-force"
+                ] + thread_opt)
+                run_mrtrix_cmd([
+                    "mrcalc", str(dc_tmp), "-abs",
                     str(output_file),
                     "-force"
                 ] + thread_opt)

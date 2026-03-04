@@ -288,7 +288,16 @@ dwi2fod msmt_csd dwi_harmonized.mif \
     -mask mask.mif
 ```
 
-The harmonized FODs can then be used in the standard FBA pipeline (`population_template`, `fod2fixel`, `fixelcfestats`, etc.).
+Since the harmonized DWI and FODs are still in native space, you need to warp them to template space (with FOD reorientation) before running the group-level FBA steps:
+
+```bash
+# Warp harmonized WM FODs to template space with reorientation
+mrtransform wm_fod_harmonized.mif wm_fod_harmonized_template.mif \
+    -warp subject2template_warp.mif \
+    -reorient_fod yes
+```
+
+The template-space FODs can then be used in the standard FBA pipeline (`population_template`, `fod2fixel`, `fixelcfestats`, etc.).
 
 **Why reuse original response functions?** RISH harmonization targets per-voxel amplitude differences between sites at each SH order. It does not alter the shape of the signal decay, so the tissue response functions (which describe the per-tissue signal profile) remain valid. Re-estimating response functions from harmonized data is also acceptable but usually unnecessary.
 
