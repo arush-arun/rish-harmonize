@@ -17,6 +17,7 @@
 #   9. Verify
 #  10. Site effect comparison (pre vs post harmonization)
 #  11. Apply harmonization to native-space DWI
+#  12. Generate QC report figures
 #
 # Usage: ./run_fod_template.sh [step]
 # ==========================================================================
@@ -442,6 +443,32 @@ for SUBJ in "${SUBJECTS[@]}"; do
 
     echo "  [$SUBJ] Harmonized -> $HARM_OUT"
 done
+echo "  Done."
+fi
+
+# ==========================================================================
+# Step 12: Generate QC report figures
+# ==========================================================================
+if [[ "$STEP" == "all" || "$STEP" == "12" ]]; then
+echo ""
+echo "================================================================"
+echo "  Step 12: Generating QC report figures"
+echo "================================================================"
+
+QC_DIR="$OUT/qc_figures"
+mkdir -p "$QC_DIR"
+
+QC_ARGS=(-o "$QC_DIR")
+
+if [[ -d "$OUT/glm_output" ]]; then
+    QC_ARGS+=(--glm-output "$OUT/glm_output")
+fi
+
+if [[ -d "$OUT/site_effect_comparison" ]]; then
+    QC_ARGS+=(--site-effect-dir "$OUT/site_effect_comparison")
+fi
+
+rish-harmonize qc-report "${QC_ARGS[@]}"
 echo "  Done."
 fi
 

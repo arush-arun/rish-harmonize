@@ -31,7 +31,7 @@ Site 11025 is chosen as reference because it has the most subjects.
 | `setup_bunya.sh` | One-time setup on UQ Bunya HPC (venv, modules, data checks) |
 | `config.sh` | Local paths, subject list, site assignments, shared helper functions |
 | `config_bunya.sh` | Bunya HPC path overrides (Neurodesk modules, scratch paths) |
-| `run_fod_template.sh` | Full FOD-template pipeline (local, 11 steps) |
+| `run_fod_template.sh` | Full FOD-template pipeline (local, 12 steps) |
 | `run_fa_template.sh` | Full FA-template pipeline (local, alternative approach) |
 | `submit_fod_pipeline.slurm` | SLURM submission wrapper for Bunya (FOD) |
 | `submit_fa_pipeline.slurm` | SLURM submission wrapper for Bunya (FA) |
@@ -107,6 +107,9 @@ For each target-site subject:
 
 Reference-site subjects are left unchanged (their scale factor is identity by definition).
 
+### Step 12: Generate QC Report Figures
+Runs `rish-harmonize qc-report` to produce publication-ready visualizations from the pipeline outputs (scale map diagnostics heatmaps and site effect comparison bar charts). Figures are saved to `qc_figures/`.
+
 ## Output Structure
 
 ```
@@ -161,6 +164,10 @@ pipeline_output_fod/
         b1000/scale_l0.mif, scale_l2.mif, ...
         b2000/scale_l0.mif, ...
       dwi_harmonized.mif        # final harmonized DWI
+  qc_figures/                   # Step 12: QC visualizations
+    site_effect_comparison.png    # pre vs post eta-squared bar chart
+    scale_map_heatmap_b1000.png   # scale factor heatmap per site/SH order
+    scale_map_heatmap_b2000.png
 ```
 
 ## Understanding the Outputs
