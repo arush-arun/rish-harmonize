@@ -273,6 +273,25 @@ rish-harmonize apply-harmonization dwi.mif \
     --lmax-json shell_lmax.json
 ```
 
+## Downstream Analysis: Fixel-Based Analysis (FBA)
+
+To use harmonized data in a fixel-based analysis pipeline, re-estimate FODs from the harmonized DWI:
+
+```bash
+# Re-compute FODs from harmonized DWI
+# Reuse the original averaged response functions — RISH harmonization corrects
+# amplitude differences across sites, so the response function shape is preserved
+dwi2fod msmt_csd dwi_harmonized.mif \
+    avg_wm_response.txt wm_fod_harmonized.mif \
+    avg_gm_response.txt gm_harmonized.mif \
+    avg_csf_response.txt csf_harmonized.mif \
+    -mask mask.mif
+```
+
+The harmonized FODs can then be used in the standard FBA pipeline (`population_template`, `fod2fixel`, `fixelcfestats`, etc.).
+
+**Why reuse original response functions?** RISH harmonization targets per-voxel amplitude differences between sites at each SH order. It does not alter the shape of the signal decay, so the tissue response functions (which describe the per-tissue signal profile) remain valid. Re-estimating response functions from harmonized data is also acceptable but usually unnecessary.
+
 ## References
 
 - De Luca, A. et al. (2025). Cross-site harmonization of diffusion MRI data without matched training subjects. *Magnetic Resonance in Medicine*, 94(4), 1750-1762.
