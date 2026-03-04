@@ -27,7 +27,7 @@ QSIPREP="/scratch/user/uqahonne/ukb/bed_analysis/qsiprep_output_bed_controls_rec
 SITE_CSV="/scratch/user/uqahonne/ukb/bed_analysis/rish_harmonize/ukb_site_info.csv"
 NTHREADS=${SLURM_CPUS_PER_TASK:-16}
 
-# 14 usable subjects with site assignments (same as local config)
+# 14 usable subjects with site assignments (same as local config) #these are dummy subjects, please use this as reference only
 declare -A SITE_MAP=(
     [sub-0000001]=11025 [sub-0000002]=11025 [sub-0000003]=11025
     [sub-0000004]=11025 [sub-0000005]=11025 [sub-0000006]=11025
