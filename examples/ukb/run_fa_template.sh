@@ -14,6 +14,9 @@
 #   6. Create group mask
 #   7. Run RISH-GLM
 #   8. Verify
+#   9. Site effect comparison (pre vs post harmonization)
+#  10. Apply harmonization to native-space DWI
+#  11. Generate QC report figures
 #
 # Usage: ./run_fa_template.sh [step]
 # ==========================================================================
@@ -224,6 +227,162 @@ fi
 # ==========================================================================
 if [[ "$STEP" == "all" || "$STEP" == "8" ]]; then
     step_verify "$OUT" "$OUT/template_masks/group_mask.mif"
+fi
+
+# ==========================================================================
+# Step 9: Site effect comparison (pre vs post harmonization)
+# ==========================================================================
+if [[ "$STEP" == "all" || "$STEP" == "9" ]]; then
+    step_site_effect_comparison "$OUT" "$OUT/template_masks/group_mask.mif"
+fi
+
+# ==========================================================================
+# Step 10: Apply harmonization to native-space DWI
+#
+# Warps scale maps from template back to native space using ANTs inverse
+# transforms, re-masks them, then applies per-shell SH-level harmonization.
+# Reference-site subjects are untouched.
+# ==========================================================================
+if [[ "$STEP" == "all" || "$STEP" == "10" ]]; then
+echo ""
+echo "================================================================"
+echo "  Step 10: Applying harmonization to native DWI"
+echo "================================================================"
+
+GLM_DIR="$OUT/glm_output"
+TEMPLATE_DIR="$OUT/population_template"
+TEMPLATE="$TEMPLATE_DIR/template0.nii.gz"
+HARMONIZED_DIR="$OUT/harmonized"
+LMAX_JSON="$GLM_DIR/glm/shell_lmax.json"
+ANTS_TMP="$OUT/tmp"
+mkdir -p "$HARMONIZED_DIR" "$ANTS_TMP"
+
+if [[ ! -f "$LMAX_JSON" ]]; then
+    echo "  ERROR: shell_lmax.json not found. Run step 7 first."
+    exit 1
+fi
+
+for SUBJ in "${SUBJECTS[@]}"; do
+    SITE="${SITE_MAP[$SUBJ]}"
+
+    # Skip reference site subjects (no correction needed)
+    if [[ "$SITE" == "$REF_SITE" ]]; then
+        echo "  [$SUBJ] Reference site ($REF_SITE), skipping"
+        continue
+    fi
+
+    HARM_OUT="$HARMONIZED_DIR/$SUBJ/dwi_harmonized.mif"
+    if [[ -f "$HARM_OUT" ]]; then
+        echo "  [$SUBJ] Already harmonized, skipping"
+        continue
+    fi
+
+    # Check that scale maps exist for this site
+    SCALE_DIR="$GLM_DIR/scale_maps/$SITE"
+    if [[ ! -d "$SCALE_DIR" ]]; then
+        echo "  [$SUBJ] WARNING: No scale maps for site $SITE, skipping"
+        continue
+    fi
+
+    # Find ANTs transforms for this subject
+    FA_BASE="${SUBJ}_FA"
+    WARP=$(ls "$TEMPLATE_DIR"/input*-${FA_BASE}-1Warp.nii.gz 2>/dev/null | head -1)
+    AFFINE=$(ls "$TEMPLATE_DIR"/input*-${FA_BASE}-0GenericAffine.mat 2>/dev/null | head -1)
+    INV_WARP=$(ls "$TEMPLATE_DIR"/input*-${FA_BASE}-1InverseWarp.nii.gz 2>/dev/null | head -1)
+
+    if [[ -z "$INV_WARP" || -z "$AFFINE" ]]; then
+        echo "  [$SUBJ] WARNING: Transforms not found, skipping"
+        continue
+    fi
+
+    # Warp scale maps to native space and re-mask
+    NATIVE_SCALES="$HARMONIZED_DIR/$SUBJ/native_scale_maps"
+    NATIVE_MASK="$OUT/mif/$SUBJ/mask.mif"
+    mkdir -p "$HARMONIZED_DIR/$SUBJ" "$NATIVE_SCALES"
+
+    # Get a native-space reference image for ANTs
+    NATIVE_REF="$ANTS_TMP/${SUBJ}_ref.nii.gz"
+    if [[ ! -f "$NATIVE_REF" ]]; then
+        mrconvert "$OUT/mif/$SUBJ/dwi.mif" "$NATIVE_REF" \
+            -coord 3 0 -force -quiet
+    fi
+
+    for BDIR in "$SCALE_DIR"/b*/; do
+        [[ ! -d "$BDIR" ]] && continue
+        BVAL=$(basename "$BDIR")
+        NATIVE_B_DIR="$NATIVE_SCALES/$BVAL"
+        mkdir -p "$NATIVE_B_DIR"
+
+        for SCALE_MIF in "$BDIR"/scale_l*_${SITE}.mif; do
+            [[ ! -f "$SCALE_MIF" ]] && continue
+            FNAME=$(basename "$SCALE_MIF" "_${SITE}.mif")
+            NATIVE_SCALE="$NATIVE_B_DIR/${FNAME}.mif"
+            [[ -f "$NATIVE_SCALE" ]] && continue
+
+            # Convert scale map to NIfTI for ANTs
+            TMP_SCALE_NII="$ANTS_TMP/${SUBJ}_${BVAL}_${FNAME}.nii.gz"
+            TMP_NATIVE_NII="$ANTS_TMP/${SUBJ}_${BVAL}_${FNAME}_native.nii.gz"
+            mrconvert "$SCALE_MIF" "$TMP_SCALE_NII" -force -quiet
+
+            # Warp template-space scale map to native space (inverse transforms)
+            # ANTs inverse: apply inverse warp first, then inverse affine
+            antsApplyTransforms \
+                -d 3 -i "$TMP_SCALE_NII" -r "$NATIVE_REF" \
+                -t "[${AFFINE},1]" -t "$INV_WARP" \
+                -o "$TMP_NATIVE_NII" --interpolation Linear
+
+            # Convert back to MIF
+            TMP_WARPED="$NATIVE_B_DIR/${FNAME}_warped.mif"
+            mrconvert "$TMP_NATIVE_NII" "$TMP_WARPED" -force -quiet
+            rm -f "$TMP_SCALE_NII" "$TMP_NATIVE_NII"
+
+            # Re-mask: set background voxels to 1.0 (neutral scaling)
+            mrcalc "$TMP_WARPED" "$NATIVE_MASK" -mult \
+                   "$NATIVE_MASK" 1 -sub -neg -add \
+                   "$NATIVE_SCALE" -force -quiet
+            rm -f "$TMP_WARPED"
+        done
+    done
+
+    rm -f "$NATIVE_REF"
+
+    # Apply harmonization to DWI
+    rish-harmonize apply-harmonization \
+        "$OUT/mif/$SUBJ/dwi.mif" \
+        --scale-maps "$NATIVE_SCALES" \
+        -o "$HARM_OUT" \
+        --lmax-json "$LMAX_JSON" \
+        --threads "$NTHREADS"
+
+    echo "  [$SUBJ] Harmonized -> $HARM_OUT"
+done
+echo "  Done."
+fi
+
+# ==========================================================================
+# Step 11: Generate QC report figures
+# ==========================================================================
+if [[ "$STEP" == "all" || "$STEP" == "11" ]]; then
+echo ""
+echo "================================================================"
+echo "  Step 11: Generating QC report figures"
+echo "================================================================"
+
+QC_DIR="$OUT/qc_figures"
+mkdir -p "$QC_DIR"
+
+QC_ARGS=(-o "$QC_DIR")
+
+if [[ -d "$OUT/glm_output" ]]; then
+    QC_ARGS+=(--glm-output "$OUT/glm_output")
+fi
+
+if [[ -d "$OUT/site_effect_comparison" ]]; then
+    QC_ARGS+=(--site-effect-dir "$OUT/site_effect_comparison")
+fi
+
+rish-harmonize qc-report "${QC_ARGS[@]}"
+echo "  Done."
 fi
 
 echo ""
