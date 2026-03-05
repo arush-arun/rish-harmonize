@@ -144,13 +144,18 @@ for SUBJ in "${SUBJECTS[@]}"; do
         TEMPLATE_RISH_DIR="$OUT/template_rish/$SUBJ/$BVAL/rish"
         mkdir -p "$TEMPLATE_RISH_DIR"
 
+        # Use a temp dir under $OUT (not /tmp) so files are visible
+        # inside Singularity/Apptainer containers on HPC
+        ANTS_TMP="$OUT/tmp"
+        mkdir -p "$ANTS_TMP"
+
         for RISH_FILE in "$BDIR/rish"/rish_l*.mif; do
             FNAME=$(basename "$RISH_FILE" .mif)
             OUTFILE="$TEMPLATE_RISH_DIR/${FNAME}.mif"
             [[ -f "$OUTFILE" ]] && continue
 
-            TMP_IN="/tmp/rish_${SUBJ}_${BVAL}_${FNAME}.nii.gz"
-            TMP_OUT="/tmp/rish_${SUBJ}_${BVAL}_${FNAME}_template.nii.gz"
+            TMP_IN="$ANTS_TMP/rish_${SUBJ}_${BVAL}_${FNAME}.nii.gz"
+            TMP_OUT="$ANTS_TMP/rish_${SUBJ}_${BVAL}_${FNAME}_template.nii.gz"
             mrconvert "$RISH_FILE" "$TMP_IN" -force -quiet
 
             antsApplyTransforms \
