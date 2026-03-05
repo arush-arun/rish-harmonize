@@ -116,7 +116,7 @@ else
     cd "$TEMPLATE_DIR"
     antsMultivariateTemplateConstruction2.sh \
         -d 3 \
-        -o "$TEMPLATE_DIR/template" \
+        -o "$TEMPLATE_DIR/" \
         -n 0 \
         -r 1 \
         -i 4 \
@@ -152,10 +152,10 @@ TEMPLATE_DIR="$OUT/population_template"
 
 for SUBJ in "${SUBJECTS[@]}"; do
     FA_BASE="${SUBJ}_FA"
-    WARP="$TEMPLATE_DIR/template${FA_BASE}1Warp.nii.gz"
-    AFFINE="$TEMPLATE_DIR/template${FA_BASE}0GenericAffine.mat"
+    WARP=$(ls "$TEMPLATE_DIR"/input*-${FA_BASE}-1Warp.nii.gz 2>/dev/null | head -1)
+    AFFINE=$(ls "$TEMPLATE_DIR"/input*-${FA_BASE}-0GenericAffine.mat 2>/dev/null | head -1)
 
-    if [[ ! -f "$WARP" || ! -f "$AFFINE" ]]; then
+    if [[ -z "$WARP" || -z "$AFFINE" ]]; then
         echo "  [$SUBJ] WARNING: Transforms not found, skipping"
         continue
     fi
@@ -208,8 +208,8 @@ else
     MASK_ARGS=""
     for SUBJ in "${SUBJECTS[@]}"; do
         FA_BASE="${SUBJ}_FA"
-        WARP="$TEMPLATE_DIR/template${FA_BASE}1Warp.nii.gz"
-        AFFINE="$TEMPLATE_DIR/template${FA_BASE}0GenericAffine.mat"
+        WARP=$(ls "$TEMPLATE_DIR"/input*-${FA_BASE}-1Warp.nii.gz 2>/dev/null | head -1)
+        AFFINE=$(ls "$TEMPLATE_DIR"/input*-${FA_BASE}-0GenericAffine.mat 2>/dev/null | head -1)
         NATIVE_MASK=$(find_mask "$SUBJ")
         TMPL_MASK="$MASK_DIR/${SUBJ}_mask_template.nii.gz"
 
