@@ -169,60 +169,99 @@ def compute_scale_maps(
                 str(tar_thresh),
                 "-force"
             ] + thread_opt)
-            
-            # Step 2: Compute ratio
-            ratio = tmpdir / f"ratio_l{l}.mif"
-            run_mrtrix_cmd([
-                "mrcalc", ref_img, str(tar_thresh), "-div",
-                str(ratio),
-                "-force"
-            ] + thread_opt)
-            
-            # Step 3: Apply mask if provided
-            if mask:
-                masked = tmpdir / f"ratio_l{l}_masked.mif"
-                run_mrtrix_cmd([
-                    "mrcalc", str(ratio), mask, "-mult",
-                    str(masked),
-                    "-force"
-                ] + thread_opt)
-                ratio = masked
 
-            # Step 4: Smooth if requested
-            # Use smooth(ratio*mask) / smooth(mask) to correct for boundary effects
+            # Steps 2-4: Smooth numerator and denominator independently
+            # before dividing, to avoid heavy-tailed ratio explosion
+            # when target has near-zero voxels (issue #4).
             if smoothing_fwhm > 0:
-                smoothed = tmpdir / f"ratio_l{l}_smooth.mif"
-                # Convert FWHM to stdev: sigma = FWHM / (2 * sqrt(2 * ln(2))) ≈ FWHM / 2.355
                 sigma = smoothing_fwhm / 2.355
+
+                # Mask ref and target separately
+                if mask:
+                    ref_masked = tmpdir / f"ref_l{l}_masked.mif"
+                    run_mrtrix_cmd([
+                        "mrcalc", ref_img, mask, "-mult",
+                        str(ref_masked), "-force"
+                    ] + thread_opt)
+                    tar_masked = tmpdir / f"tar_l{l}_masked.mif"
+                    run_mrtrix_cmd([
+                        "mrcalc", str(tar_thresh), mask, "-mult",
+                        str(tar_masked), "-force"
+                    ] + thread_opt)
+                else:
+                    ref_masked = ref_img
+                    tar_masked = tar_thresh
+
+                # Smooth ref and target independently
+                ref_smooth = tmpdir / f"ref_l{l}_smooth.mif"
                 run_mrtrix_cmd([
-                    "mrfilter", str(ratio),
+                    "mrfilter", str(ref_masked),
                     "smooth", "-stdev", str(sigma),
-                    str(smoothed),
-                    "-force"
+                    str(ref_smooth), "-force"
+                ] + thread_opt)
+                tar_smooth = tmpdir / f"tar_l{l}_smooth.mif"
+                run_mrtrix_cmd([
+                    "mrfilter", str(tar_masked),
+                    "smooth", "-stdev", str(sigma),
+                    str(tar_smooth), "-force"
                 ] + thread_opt)
 
+                # Boundary-correct both
                 if mask:
-                    # Correct for boundary effects: divide by smoothed mask
                     smoothed_mask = tmpdir / f"mask_l{l}_smooth.mif"
                     run_mrtrix_cmd([
                         "mrfilter", mask,
                         "smooth", "-stdev", str(sigma),
-                        str(smoothed_mask),
-                        "-force"
+                        str(smoothed_mask), "-force"
                     ] + thread_opt)
 
-                    corrected = tmpdir / f"ratio_l{l}_corrected.mif"
-                    # Where smoothed_mask > 0.1, divide; else set to 0
+                    ref_corrected = tmpdir / f"ref_l{l}_corrected.mif"
                     run_mrtrix_cmd([
-                        "mrcalc", str(smoothed), str(smoothed_mask),
+                        "mrcalc", str(ref_smooth), str(smoothed_mask),
                         "0.1", "-max", "-div",
                         str(mask), "-mult",
-                        str(corrected),
-                        "-force"
+                        str(ref_corrected), "-force"
                     ] + thread_opt)
-                    ratio = corrected
+
+                    tar_corrected = tmpdir / f"tar_l{l}_corrected.mif"
+                    run_mrtrix_cmd([
+                        "mrcalc", str(tar_smooth), str(smoothed_mask),
+                        "0.1", "-max", "-div",
+                        str(mask), "-mult",
+                        str(tar_corrected), "-force"
+                    ] + thread_opt)
                 else:
-                    ratio = smoothed
+                    ref_corrected = ref_smooth
+                    tar_corrected = tar_smooth
+
+                # Re-threshold corrected target before division
+                tar_final = tmpdir / f"tar_l{l}_final.mif"
+                run_mrtrix_cmd([
+                    "mrcalc", str(tar_corrected), str(min_signal), "-max",
+                    str(tar_final), "-force"
+                ] + thread_opt)
+
+                # Divide: smooth(ref) / smooth(target)
+                ratio = tmpdir / f"ratio_l{l}.mif"
+                run_mrtrix_cmd([
+                    "mrcalc", str(ref_corrected), str(tar_final), "-div",
+                    str(ratio), "-force"
+                ] + thread_opt)
+            else:
+                # No smoothing: direct ratio (unchanged behaviour)
+                ratio = tmpdir / f"ratio_l{l}.mif"
+                run_mrtrix_cmd([
+                    "mrcalc", ref_img, str(tar_thresh), "-div",
+                    str(ratio), "-force"
+                ] + thread_opt)
+
+                if mask:
+                    masked = tmpdir / f"ratio_l{l}_masked.mif"
+                    run_mrtrix_cmd([
+                        "mrcalc", str(ratio), mask, "-mult",
+                        str(masked), "-force"
+                    ] + thread_opt)
+                    ratio = masked
             
             # Step 5: Clip to reasonable range
             clipped = tmpdir / f"ratio_l{l}_clipped.mif"
