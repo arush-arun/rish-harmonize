@@ -66,6 +66,22 @@ sbatch submit_fod_pipeline.slurm
 sbatch submit_fod_pipeline.slurm 8
 ```
 
+### FA-template variant
+
+The FA-template pipeline is run the same way, substituting the FA scripts.
+It uses ANTs SyN registration instead of MRtrix `population_template` (see
+[Pipeline Steps (FA Template)](#pipeline-steps-fa-template) below).
+
+```bash
+# Local — run all steps, or a single step (e.g. step 7 = RISH-GLM)
+./run_fa_template.sh
+./run_fa_template.sh 7
+
+# Bunya HPC
+sbatch submit_fa_pipeline.slurm
+sbatch submit_fa_pipeline.slurm 3      # e.g. step 3 = build FA template
+```
+
 ## Pipeline Steps (FOD Template)
 
 ### Step 1: Convert DWI to MIF
@@ -110,7 +126,104 @@ Reference-site subjects are left unchanged (their scale factor is identity by de
 ### Step 12: Generate QC Report Figures
 Runs `rish-harmonize qc-report` to produce publication-ready visualizations from the pipeline outputs (scale map diagnostics heatmaps and site effect comparison bar charts). Figures are saved to `qc_figures/`.
 
-## Output Structure
+## Pipeline Steps (FA Template)
+
+An alternative to the FOD-template pipeline that builds the study template from
+**FA maps** using **ANTs SyN** registration instead of MRtrix
+`population_template`. It is simpler and faster to register (scalar FA images
+rather than WM FODs), at the cost of losing crossing-fibre information during
+registration. The RISH-GLM harmonization itself (steps 7–11) is identical — only
+the template-building and warping mechanics differ.
+
+Output goes to `pipeline_output_fa/`. Run with `./run_fa_template.sh [step]`
+(local) or `sbatch submit_fa_pipeline.slurm [step]` (Bunya).
+
+### Step 1: Convert DWI to MIF
+Converts QSIPrep NIfTI outputs to MRtrix `.mif` format with embedded gradient tables. (Shared with the FOD pipeline via `step_convert_dwi`.)
+
+### Step 2: Compute FA Maps
+For each subject, fits the diffusion tensor (`dwi2tensor`) within the brain mask and derives the FA map (`tensor2metric -fa`). These scalar maps are the registration target for ANTs.
+
+### Step 3: Build FA Population Template (ANTs)
+Runs ANTs `antsMultivariateTemplateConstruction2.sh` (`-d 3 -m CC -t SyN -i 4`) to build an unbiased study-specific FA template from all subjects' FA maps. This is the most time-consuming step (several hours). For each subject it produces a forward warp (`*-1Warp.nii.gz`), an affine (`*-0GenericAffine.mat`), and an inverse warp (`*-1InverseWarp.nii.gz`).
+
+### Step 4: Extract Native RISH
+Runs `rish-harmonize extract-native-rish` per subject. For each b-shell, fits spherical harmonics to the DWI signal and computes rotationally invariant features `rish_l0, rish_l2, ..., rish_l8`. (Shared with the FOD pipeline via `step_extract_rish`.)
+
+### Step 5: Warp RISH to Template (ANTs transforms)
+Brings each subject's RISH maps into template space with `antsApplyTransforms` (applying the affine + forward warp from step 3, linear interpolation). RISH features are scalars, so standard spatial warping is used without SH reorientation. Because ANTs operates on NIfTI, each map is round-tripped `mrconvert` → `.nii.gz` → ANTs → `.mif`.
+
+### Step 6: Create Group Mask
+Warps each subject's native brain mask into template space (`antsApplyTransforms`, nearest-neighbour) and intersects them (`mrmath ... min`). Only voxels inside every subject's mask are kept.
+
+### Step 7: Run RISH-GLM
+Runs `rish-harmonize rish-glm` with a manifest CSV of each subject's site and template-space RISH directory. Fits a joint GLM across sites per shell and SH order, then computes per-site scale maps `scale_l{order}_{site}.mif`. (Shared with the FOD pipeline via `step_run_glm`.)
+
+### Step 8: Verify
+Prints scale map statistics (mean, median, std within the group mask) for sanity checking. (Shared via `step_verify`.)
+
+### Step 9: Site Effect Comparison
+Runs `rish-harmonize site-effect` on RISH l0 maps before and after harmonization (per shell), quantifying remaining site effect via permutation testing. (Shared via `step_site_effect_comparison`.)
+
+### Step 10: Apply Harmonization to Native DWI
+For each target-site subject:
+1. **Warp scale maps to native space** with `antsApplyTransforms` using the *inverse* transforms — applied in inverse order: inverse affine `[affine,1]` then `*-1InverseWarp.nii.gz`
+2. **Re-mask** scale maps in native space — sets voxels outside the brain mask to 1.0 (neutral scaling), preventing interpolation artifacts at brain boundaries
+3. **Apply harmonization** with `rish-harmonize apply-harmonization`, which decomposes the DWI per shell into SH coefficients, scales each order, and reconstructs the harmonized DWI
+
+Reference-site subjects are skipped (their scale factor is identity by definition).
+
+### Step 11: Generate QC Report Figures
+Runs `rish-harmonize qc-report` to produce scale-map diagnostic heatmaps and the pre/post site-effect bar chart. Figures are saved to `qc_figures/`.
+
+### Key differences from the FOD pipeline
+
+| Aspect | FOD template | FA template |
+|--------|--------------|-------------|
+| Registration | MRtrix `population_template` | ANTs `antsMultivariateTemplateConstruction2.sh` (SyN, CC metric) |
+| Registration target | WM FODs (multi-tissue CSD) | FA maps (scalar) |
+| Crossing-fibre info | Preserved during registration | Lost (scalar FA only) |
+| Transform format | Single `warpfull` (`mrtransform`/`warpconvert`) | Affine `.mat` + forward/inverse warps (`antsApplyTransforms`) |
+| FOD/response steps | Steps 2–3 (response, msmt_csd, mtnormalise) | None — replaced by a single FA-map step |
+| Step count | 12 | 11 |
+| Prerequisite | MRtrix3 only | MRtrix3 **and** ANTs |
+
+> **Singularity/Apptainer note:** ANTs intermediate files are written to
+> `$OUT/tmp` rather than `/tmp`. On HPC, ANTs runs inside a container and `/tmp`
+> is not visible to subsequent MRtrix commands, so a temp directory under the
+> shared output path is used instead. The `step` argument lets you resume the
+> long template build (step 3) independently of the rest of the pipeline.
+
+### FA output structure
+
+Same as the FOD layout below, with these differences:
+
+```
+pipeline_output_fa/
+  mif/                          # Step 1: converted DWI + masks
+  fa_maps/                      # Step 2: per-subject FA maps
+    sub-*_FA.nii.gz
+  population_template/          # Step 3: ANTs FA template + transforms
+    template0.nii.gz
+    input{NNNN}-{subject}_FA-0GenericAffine.mat
+    input{NNNN}-{subject}_FA-1Warp.nii.gz
+    input{NNNN}-{subject}_FA-1InverseWarp.nii.gz
+  tmp/                          # ANTs scratch (container-visible; not /tmp)
+  native_rish/                  # Step 4: per-subject native RISH
+  template_rish/                # Step 5: RISH warped to template (ANTs)
+  template_masks/               # Step 6: group mask (+ per-subject warped masks)
+  glm_output/                   # Step 7: RISH-GLM results + scale maps
+  site_effect_comparison/       # Step 9: pre/post comparison
+  harmonized/                   # Step 10: harmonized native DWI
+  qc_figures/                   # Step 11: QC visualizations
+```
+
+ANTs names each subject's transforms with an `input{NNNN}-{subject}_FA-{N}{Type}`
+prefix (the `{NNNN}` index is assigned by template construction). The pipeline
+locates them by globbing on the `{subject}_FA` portion, so the exact index does
+not matter.
+
+## Output Structure (FOD Template)
 
 ```
 pipeline_output_fod/
