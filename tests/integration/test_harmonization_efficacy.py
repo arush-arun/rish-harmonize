@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from .conftest import pytestmark  # noqa: F401 — applies integration + skip-if-no-MRtrix markers
 from .conftest import _create_synthetic_dwi, _create_mask
 
 # Known multiplicative site effect injected into the target site's l0 RISH.
