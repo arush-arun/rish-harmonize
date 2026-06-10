@@ -123,8 +123,216 @@ for direct harmonization in template space.
 | `harmonize` | Harmonize a target FOD against a template |
 | `rish-glm` | Fit RISH-GLM joint model and harmonize |
 | `site-effect` | Test for site effects via permutation testing |
+| `qc-report` | Generate QC visualization figures |
 
 Run `rish-harmonize <command> --help` for detailed options.
+
+## Modes
+
+The `rish-glm` command supports three modes, auto-detected from manifest columns:
+
+| Mode | Manifest column | Description |
+|------|----------------|-------------|
+| `signal` | `dwi_path` | **Recommended.** Fits SH to raw DWI per shell, extracts RISH, fits GLM jointly. Handles shell detection, lmax selection, and SH fitting internally. |
+| `signal_rish` | `rish_dir` | Pre-extracted RISH directories (e.g., when RISH has already been warped to template space). Skips SH fitting; goes straight to GLM. |
+| `fod` | `fod_path` | Operates on FOD images from CSD. Use `--harmonize` to apply scale maps directly in template space. |
+
+Other commands operate on specific inputs and do not require a mode flag.
+
+## CLI Reference
+
+### `detect-shells`
+
+Show b-value shell structure of a DWI image.
+
+```
+rish-harmonize detect-shells [-h] [--b0-threshold B0_THRESHOLD] dwi
+```
+
+| Argument | Description |
+|----------|-------------|
+| `dwi` | Input DWI image |
+| `--b0-threshold` | B-value threshold for b=0 (default: 50) |
+
+### `extract-rish`
+
+Extract RISH features from an SH coefficient image (single image, single shell).
+
+```
+rish-harmonize extract-rish [-h] -o OUTPUT [--lmax LMAX] [--mask MASK]
+                            [--threads THREADS] input
+```
+
+| Argument | Description |
+|----------|-------------|
+| `input` | Input SH coefficient image |
+| `-o, --output` | Output directory |
+| `--lmax` | Maximum SH order |
+| `--mask` | Brain mask |
+| `--threads` | Number of threads |
+
+### `extract-native-rish`
+
+Extract per-shell RISH from a native-space DWI. Splits shells, fits SH per shell, and computes RISH features. Use `--consistent-with` to ensure the same lmax across all subjects.
+
+```
+rish-harmonize extract-native-rish [-h] -o OUTPUT [--mask MASK] [--lmax LMAX]
+                                   [--consistent-with FILE] [--threads THREADS]
+                                   dwi
+```
+
+| Argument | Description |
+|----------|-------------|
+| `dwi` | Input DWI image (native space) |
+| `-o, --output` | Output directory |
+| `--mask` | Brain mask |
+| `--lmax` | Maximum SH order (applied to all shells, capped by data) |
+| `--consistent-with` | Text file listing all DWI images; computes minimum lmax across all subjects per shell |
+| `--threads` | Number of threads |
+
+### `create-template`
+
+Create a RISH reference template by averaging RISH features across reference-site subjects.
+
+```
+rish-harmonize create-template [-h] --mode {signal,fod} [--rish-list RISH_LIST]
+                               [--image-list IMAGE_LIST] [--mask-list MASK_LIST]
+                               -o OUTPUT [--lmax LMAX] [--lmax-json LMAX_JSON]
+                               [--threads THREADS]
+```
+
+| Argument | Description |
+|----------|-------------|
+| `--mode` | Harmonization mode (`signal` or `fod`) |
+| `--rish-list` | (signal) Text file with one RISH directory per line |
+| `--image-list` | (fod) Text file with one FOD image path per line |
+| `--mask-list` | Text file with one mask path per line |
+| `-o, --output` | Output directory |
+| `--lmax` | (fod) Maximum SH order |
+| `--lmax-json` | (signal) JSON file with shell_lmax (from `extract-native-rish`) |
+| `--threads` | Number of threads |
+
+### `compute-scale-maps`
+
+Compute per-shell scale maps from reference and target RISH in template space.
+
+```
+rish-harmonize compute-scale-maps [-h] --ref-rish REF_RISH --target-rish TARGET_RISH
+                                  -o OUTPUT [--mask MASK] [--smoothing SMOOTHING]
+                                  [--clip-min CLIP_MIN] [--clip-max CLIP_MAX]
+                                  [--threads THREADS]
+```
+
+| Argument | Description |
+|----------|-------------|
+| `--ref-rish` | Reference RISH directory (template space) |
+| `--target-rish` | Target RISH directory (template space) |
+| `-o, --output` | Output directory for scale maps |
+| `--mask` | Brain mask (template space) |
+| `--smoothing` | Scale map smoothing FWHM in mm (default: 3.0) |
+| `--clip-min` | Minimum scale factor (default: 0.5) |
+| `--clip-max` | Maximum scale factor (default: 2.0) |
+| `--threads` | Number of threads |
+
+### `apply-harmonization`
+
+Apply native-space scale maps to a DWI. Fits SH per shell, multiplies by the corresponding scale map, then reconstructs the DWI signal.
+
+```
+rish-harmonize apply-harmonization [-h] --scale-maps SCALE_MAPS -o OUTPUT
+                                   [--lmax-json LMAX_JSON] [--threads THREADS]
+                                   dwi
+```
+
+| Argument | Description |
+|----------|-------------|
+| `dwi` | Input DWI image (native space) |
+| `--scale-maps` | Scale maps directory (native space) |
+| `-o, --output` | Output harmonized DWI |
+| `--lmax-json` | JSON file with shell_lmax for consistency |
+| `--threads` | Number of threads |
+
+### `harmonize`
+
+Harmonize a target FOD image against a reference template. FOD-mode shortcut that computes scale maps and applies them in one step.
+
+```
+rish-harmonize harmonize [-h] --target TARGET --template TEMPLATE [--mask MASK]
+                         -o OUTPUT [--lmax LMAX] [--smoothing SMOOTHING]
+                         [--clip-min CLIP_MIN] [--clip-max CLIP_MAX]
+                         [--threads THREADS]
+```
+
+| Argument | Description |
+|----------|-------------|
+| `--target` | Target FOD image |
+| `--template` | Template directory |
+| `--mask` | Brain mask |
+| `-o, --output` | Output path |
+| `--lmax` | Maximum SH order |
+| `--smoothing` | Scale map smoothing FWHM in mm (default: 3.0) |
+| `--clip-min` | Minimum scale factor (default: 0.5) |
+| `--clip-max` | Maximum scale factor (default: 2.0) |
+| `--threads` | Number of threads |
+
+### `rish-glm`
+
+Fit a joint RISH-GLM model across all sites and compute scale maps. Supports covariates (age, sex, etc.) via the manifest CSV. Use `--harmonize` to also apply scale maps to target-site DWIs.
+
+```
+rish-harmonize rish-glm [-h] --manifest MANIFEST --reference-site REFERENCE_SITE
+                        [--mode {signal,signal_rish,fod}] [--mask MASK] -o OUTPUT
+                        [--lmax LMAX] [--harmonize] [--smoothing SMOOTHING]
+                        [--clip-min CLIP_MIN] [--clip-max CLIP_MAX]
+                        [--threads THREADS]
+```
+
+| Argument | Description |
+|----------|-------------|
+| `--manifest` | CSV with columns: subject, site, dwi_path/fod_path/rish_dir, [covariates] |
+| `--reference-site` | Name of the reference site |
+| `--mode` | Mode: `signal`, `signal_rish`, or `fod` (auto-detected from manifest) |
+| `--mask` | Group brain mask |
+| `-o, --output` | Output directory |
+| `--lmax` | Maximum SH order |
+| `--harmonize` | Also harmonize all target-site DWIs |
+| `--smoothing` | Scale map smoothing FWHM in mm (default: 3.0) |
+| `--clip-min` | Minimum scale factor (default: 0.5) |
+| `--clip-max` | Maximum scale factor (default: 2.0) |
+| `--threads` | Number of threads |
+
+### `site-effect`
+
+Test for residual site effects via permutation testing on RISH or image data.
+
+```
+rish-harmonize site-effect [-h] --site-list SITE_LIST --mask MASK -o OUTPUT
+                           [--n-permutations N_PERMUTATIONS] [--seed SEED]
+```
+
+| Argument | Description |
+|----------|-------------|
+| `--site-list` | CSV with columns: site, rish_path/image_path |
+| `--mask` | Group brain mask |
+| `-o, --output` | Output directory |
+| `--n-permutations` | Number of permutations (default: 5000) |
+| `--seed` | Random seed (default: 42) |
+
+### `qc-report`
+
+Generate QC visualization figures from pipeline outputs (GLM scale maps and/or site effect comparisons).
+
+```
+rish-harmonize qc-report [-h] [--glm-output GLM_OUTPUT]
+                         [--site-effect-dir SITE_EFFECT_DIR] -o OUTPUT [--dpi DPI]
+```
+
+| Argument | Description |
+|----------|-------------|
+| `--glm-output` | GLM output directory (with scale_maps/) |
+| `--site-effect-dir` | Site effect comparison directory (with b*/pre/ and b*/post/) |
+| `-o, --output` | Output directory for figures |
+| `--dpi` | Figure DPI (default: 150) |
 
 ## Signal-level SH pipeline
 
